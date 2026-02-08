@@ -6,234 +6,238 @@ class ContactScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      child: Column(
-        children: [
-          // Header
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(vertical: 40, horizontal: 24),
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [
-                  Color(0xFF2D5F3F),
-                  Color(0xFF3D7F5F),
-                ],
+    return Scaffold(
+      backgroundColor: Colors.grey[50],
+      body: CustomScrollView(
+        slivers: [
+          // App Bar
+          SliverAppBar(
+            expandedHeight: 200,
+            floating: false,
+            pinned: true,
+            backgroundColor: const Color(0xFF2D5F3F),
+            flexibleSpace: FlexibleSpaceBar(
+              title: const Text(
+                'Contact Us',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 20,
+                ),
               ),
-            ),
-            child: Column(
-              children: [
-                const Icon(
-                  Icons.contact_mail,
-                  size: 60,
-                  color: Colors.white,
-                ),
-                const SizedBox(height: 16),
-                const Text(
-                  'Contact Us',
-                  style: TextStyle(
-                    fontSize: 32,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'We\'re here to help you',
-                  style: TextStyle(
-                    fontSize: 16,
-                    color: Colors.white.withOpacity(0.9),
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              children: [
-                // Contact Information Cards
-                _buildContactCard(
-                  icon: Icons.email,
-                  title: 'Email',
-                  value: 'support@troublesarthi.com',
-                  onTap: () {
-                    Clipboard.setData(
-                      const ClipboardData(text: 'support@troublesarthi.com'),
-                    );
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Email copied to clipboard')),
-                    );
-                  },
-                ),
-                const SizedBox(height: 16),
-                _buildContactCard(
-                  icon: Icons.phone,
-                  title: 'Phone',
-                  value: '+91 98765 43210',
-                  onTap: () {
-                    Clipboard.setData(
-                      const ClipboardData(text: '+91 98765 43210'),
-                    );
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                          content: Text('Phone number copied to clipboard')),
-                    );
-                  },
-                ),
-                const SizedBox(height: 16),
-                _buildContactCard(
-                  icon: Icons.location_on,
-                  title: 'Address',
-                  value: '123 Community Hub, Mumbai, India',
-                  onTap: () {
-                    Clipboard.setData(
-                      const ClipboardData(text: '123 Community Hub, Mumbai, India'),
-                    );
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Address copied to clipboard')),
-                    );
-                  },
-                ),
-
-                const SizedBox(height: 32),
-
-                // Social Media Section
-                const Text(
-                  'Follow Us',
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    color: Color(0xFF2D5F3F),
-                  ),
-                ),
-                const SizedBox(height: 20),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    _buildSocialButton(
-                      icon: Icons.facebook,
-                      color: const Color(0xFF1877F2),
-                      onTap: () {},
-                    ),
-                    const SizedBox(width: 16),
-                    _buildSocialButton(
-                      icon: Icons.camera_alt,
-                      color: const Color(0xFFE4405F),
-                      onTap: () {},
-                    ),
-                    const SizedBox(width: 16),
-                    _buildSocialButton(
-                      icon: Icons.link,
-                      color: const Color(0xFF0A66C2),
-                      onTap: () {},
-                    ),
-                  ],
-                ),
-
-                const SizedBox(height: 32),
-
-                // Newsletter Subscription
-                Container(
-                  padding: const EdgeInsets.all(24),
-                  decoration: BoxDecoration(
-                    color: Colors.grey[50],
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: Column(
-                    children: [
-                      const Icon(
-                        Icons.mail_outline,
-                        size: 50,
-                        color: Color(0xFF6B5CE7),
-                      ),
-                      const SizedBox(height: 16),
-                      const Text(
-                        'Stay Updated',
-                        style: TextStyle(
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF2D5F3F),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Subscribe to our newsletter for the latest updates and offers',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: Colors.grey[600],
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      TextField(
-                        decoration: InputDecoration(
-                          hintText: 'Enter your email',
-                          filled: true,
-                          fillColor: Colors.white,
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide.none,
-                          ),
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 20,
-                            vertical: 16,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton(
-                          onPressed: () {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('Thank you for subscribing!'),
-                              ),
-                            );
-                          },
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF7FDB6A),
-                            padding: const EdgeInsets.symmetric(vertical: 16),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                          ),
-                          child: const Text(
-                            'Subscribe',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                      ),
+              centerTitle: false,
+              titlePadding: const EdgeInsets.only(left: 20, bottom: 16),
+              background: Container(
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      Color(0xFF2D5F3F),
+                      Color(0xFF3D7F5F),
                     ],
                   ),
                 ),
-
-                const SizedBox(height: 32),
-
-                // Quick Links
-                const Text(
-                  'Quick Links',
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    color: Color(0xFF2D5F3F),
+                child: const Center(
+                  child: Icon(
+                    Icons.contact_mail,
+                    size: 60,
+                    color: Colors.white,
                   ),
                 ),
-                const SizedBox(height: 16),
-                _buildQuickLink('Privacy Policy', () {}),
-                _buildQuickLink('Terms of Service', () {}),
-                _buildQuickLink('FAQs', () {}),
-                _buildQuickLink('Help Center', () {}),
+              ),
+            ),
+          ),
 
-                const SizedBox(height: 24),
-              ],
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Get in Touch',
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF2D5F3F),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'We\'re here to help you',
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.grey[600],
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+
+                  // Contact Cards
+                  _buildContactCard(
+                    context,
+                    icon: Icons.email_outlined,
+                    title: 'Email',
+                    value: 'support@troublesarthi.com',
+                    color: const Color(0xFF6B5CE7),
+                  ),
+                  const SizedBox(height: 16),
+                  _buildContactCard(
+                    context,
+                    icon: Icons.phone_outlined,
+                    title: 'Phone',
+                    value: '+91 98765 43210',
+                    color: const Color(0xFF7FDB6A),
+                  ),
+                  const SizedBox(height: 16),
+                  _buildContactCard(
+                    context,
+                    icon: Icons.location_on_outlined,
+                    title: 'Address',
+                    value: 'Surat, Gujarat, India',
+                    color: const Color(0xFFFF6B9D),
+                  ),
+
+                  const SizedBox(height: 32),
+
+                  // Social Media
+                  const Text(
+                    'Follow Us',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF2D5F3F),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.start,
+                    children: [
+                      _buildSocialButton(
+                        icon: Icons.facebook,
+                        color: const Color(0xFF1877F2),
+                        onTap: () {},
+                      ),
+                      const SizedBox(width: 12),
+                      _buildSocialButton(
+                        icon: Icons.camera_alt,
+                        color: const Color(0xFFE4405F),
+                        onTap: () {},
+                      ),
+                      const SizedBox(width: 12),
+                      _buildSocialButton(
+                        icon: Icons.link,
+                        color: const Color(0xFF0A66C2),
+                        onTap: () {},
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 32),
+
+                  // Newsletter
+                  Container(
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFF6B5CE7), Color(0xFF8B7CE7)],
+                      ),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Icon(
+                          Icons.mail_outline,
+                          size: 40,
+                          color: Colors.white,
+                        ),
+                        const SizedBox(height: 16),
+                        const Text(
+                          'Stay Updated',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Subscribe for latest updates',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.white.withOpacity(0.9),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        TextField(
+                          decoration: InputDecoration(
+                            hintText: 'Enter your email',
+                            hintStyle: TextStyle(color: Colors.grey[400]),
+                            filled: true,
+                            fillColor: Colors.white,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: BorderSide.none,
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 14,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton(
+                            onPressed: () {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Thank you for subscribing!'),
+                                ),
+                              );
+                            },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF7FDB6A),
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              elevation: 0,
+                            ),
+                            child: const Text(
+                              'Subscribe',
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 32),
+
+                  // Quick Links
+                  const Text(
+                    'Quick Links',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF2D5F3F),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _buildQuickLink('Privacy Policy', () {}),
+                  _buildQuickLink('Terms of Service', () {}),
+                  _buildQuickLink('FAQs', () {}),
+                  _buildQuickLink('Help Center', () {}),
+
+                  const SizedBox(height: 100),
+                ],
+              ),
             ),
           ),
         ],
@@ -241,25 +245,31 @@ class ContactScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildContactCard({
-    required IconData icon,
-    required String title,
-    required String value,
-    required VoidCallback onTap,
-  }) {
+  Widget _buildContactCard(
+      BuildContext context, {
+        required IconData icon,
+        required String title,
+        required String value,
+        required Color color,
+      }) {
     return InkWell(
-      onTap: onTap,
+      onTap: () {
+        Clipboard.setData(ClipboardData(text: value));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$title copied to clipboard')),
+        );
+      },
       borderRadius: BorderRadius.circular(16),
       child: Container(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(16),
           boxShadow: [
             BoxShadow(
-              color: Colors.grey.withOpacity(0.2),
+              color: Colors.black.withOpacity(0.04),
               blurRadius: 10,
-              offset: const Offset(0, 5),
+              offset: const Offset(0, 4),
             ),
           ],
         ),
@@ -268,13 +278,13 @@ class ContactScreen extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: const Color(0xFF6B5CE7).withOpacity(0.1),
-                shape: BoxShape.circle,
+                color: color.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
               ),
               child: Icon(
                 icon,
-                color: const Color(0xFF6B5CE7),
-                size: 28,
+                color: color,
+                size: 24,
               ),
             ),
             const SizedBox(width: 16),
@@ -285,7 +295,7 @@ class ContactScreen extends StatelessWidget {
                   Text(
                     title,
                     style: TextStyle(
-                      fontSize: 14,
+                      fontSize: 13,
                       color: Colors.grey[600],
                       fontWeight: FontWeight.w600,
                     ),
@@ -294,7 +304,7 @@ class ContactScreen extends StatelessWidget {
                   Text(
                     value,
                     style: const TextStyle(
-                      fontSize: 16,
+                      fontSize: 15,
                       color: Color(0xFF2D5F3F),
                       fontWeight: FontWeight.bold,
                     ),
@@ -302,10 +312,10 @@ class ContactScreen extends StatelessWidget {
                 ],
               ),
             ),
-            const Icon(
-              Icons.copy,
-              color: Color(0xFF6B5CE7),
-              size: 20,
+            Icon(
+              Icons.content_copy,
+              color: Colors.grey[400],
+              size: 18,
             ),
           ],
         ),
@@ -322,7 +332,7 @@ class ContactScreen extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
       child: Container(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
           color: color.withOpacity(0.1),
           borderRadius: BorderRadius.circular(12),
@@ -330,7 +340,7 @@ class ContactScreen extends StatelessWidget {
         child: Icon(
           icon,
           color: color,
-          size: 28,
+          size: 24,
         ),
       ),
     );
@@ -339,21 +349,26 @@ class ContactScreen extends StatelessWidget {
   Widget _buildQuickLink(String text, VoidCallback onTap) {
     return InkWell(
       onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: BorderSide(color: Colors.grey[200]!),
+          ),
+        ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Text(
               text,
               style: TextStyle(
-                fontSize: 16,
+                fontSize: 15,
                 color: Colors.grey[700],
               ),
             ),
             Icon(
               Icons.arrow_forward_ios,
-              size: 16,
+              size: 14,
               color: Colors.grey[400],
             ),
           ],
