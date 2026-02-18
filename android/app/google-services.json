@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "241665118590",
+    "project_id": "trouble-sarthi",
+    "storage_bucket": "trouble-sarthi.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:241665118590:android:a764c51389038d0025632f",
+        "android_client_info": {
+          "package_name": "com.example.trouble_sarthi"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBH4Xi0xrqWZKQLkxv80rkSBpnVI-AJYvI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:trouble_sarthi/screens/auth/login_screen.dart';
 import 'dart:ui';
 import 'auth/login_screen.dart';
 
@@ -23,7 +24,6 @@ class _GuestLandingPageState extends State<GuestLandingPage> {
         });
       }
     } else if (index == 2) {
-      // SOS button - navigate to login directly
       Navigator.push(
         context,
         MaterialPageRoute(builder: (_) => const LoginScreen()),
@@ -75,32 +75,26 @@ class _GuestLandingPageState extends State<GuestLandingPage> {
       backgroundColor: const Color(0xFFF5F5F8),
       body: Stack(
         children: [
-          // Main Content
           SafeArea(
             child: ListView(
               padding: const EdgeInsets.only(bottom: 20),
               physics: const ClampingScrollPhysics(),
               children: [
-                // Header
                 _buildHeader(),
                 const SizedBox(height: 12),
-                // Service Grid
                 _buildServiceGrid(),
                 const SizedBox(height: 20),
-                // Get Help Now Button
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16.0),
                   child: _GetHelpButton(onTap: _navigateToLogin),
                 ),
                 const SizedBox(height: 24),
-                // Popular Near You Section
                 _buildPopularSection(),
                 const SizedBox(height: 20),
               ],
             ),
           ),
 
-          // Blur Overlay with Auth Dialog
           if (_showAuthDialog)
             GestureDetector(
               onTap: () {
@@ -129,21 +123,51 @@ class _GuestLandingPageState extends State<GuestLandingPage> {
   }
 
   Widget _buildHeader() {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color(0xFFEEEBFF),
+            Color(0xFFE8E3FF),
+            Color(0xFFEFF0FF),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF7C3FED).withOpacity(0.08),
+            blurRadius: 20,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'GUEST MODE',
-            style: TextStyle(
-              fontSize: 11,
-              color: Color(0xFF9CA3AF),
-              fontWeight: FontWeight.w500,
-              letterSpacing: 1.2,
+          // GUEST MODE label
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              color: const Color(0xFF7C3FED).withOpacity(0.1),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: const Text(
+              'GUEST MODE',
+              style: TextStyle(
+                fontSize: 10,
+                color: Color(0xFF7C3FED),
+                fontWeight: FontWeight.w600,
+                letterSpacing: 1.2,
+              ),
             ),
           ),
-          const SizedBox(height: 8),
+
+          const SizedBox(height: 12),
+
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -152,45 +176,102 @@ class _GuestLandingPageState extends State<GuestLandingPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
+                    // "Welcome to" with attractive font
+                    Text(
                       'Welcome to',
-                      style: TextStyle(
+                      style: GoogleFonts.nunito(
                         fontSize: 22,
-                        fontWeight: FontWeight.bold,
-                        color: Color(0xFF1F2937),
-                        height: 1.3,
+                        fontWeight: FontWeight.w800,
+                        color: const Color(0xFF1F2937),
+                        height: 1.2,
                       ),
                     ),
-                    const Text(
-                      'Trouble Sarthi',
-                      style: TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold,
-                        color: Color(0xFF7C3FED),
-                        height: 1.3,
+
+                    // "Trouble Sarthi" with SAMAN font + gradient
+                    ShaderMask(
+                      shaderCallback: (bounds) => const LinearGradient(
+                        colors: [
+                          Color(0xFF7C3FED),
+                          Color(0xFF9D6FFF),
+                          Color(0xFF6B28EA),
+                        ],
+                      ).createShader(bounds),
+                      child: const Text(
+                        'Trouble Sarthi',
+                        style: TextStyle(
+                          fontFamily: 'Saman',   // ← YOUR CUSTOM FONT
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,   // needed for ShaderMask
+                          height: 1.2,
+                        ),
                       ),
                     ),
                   ],
                 ),
               ),
-              _LoginButton(onTap: _navigateToLogin),
+
+              // Login Button
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0xFF7C3FED).withOpacity(0.15),
+                      blurRadius: 10,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: _navigateToLogin,
+                    borderRadius: BorderRadius.circular(20),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 20, vertical: 10),
+                      child: Text(
+                        'Login',
+                        style: GoogleFonts.nunito(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                          color: const Color(0xFF7C3FED),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
-          const SizedBox(height: 12),
-          const Text(
+
+          const SizedBox(height: 14),
+
+          // Divider line
+          Container(
+            height: 1,
+            color: const Color(0xFF7C3FED).withOpacity(0.1),
+          ),
+
+          const SizedBox(height: 14),
+
+          Text(
             'Expert help, just a tap away.',
-            style: TextStyle(
+            style: GoogleFonts.nunito(
               fontSize: 13,
-              color: Color(0xFF6B7280),
+              color: const Color(0xFF6B7280),
+              fontWeight: FontWeight.w500,
             ),
           ),
           const SizedBox(height: 2),
-          const Text(
+          Text(
             'What do you need help with today?',
-            style: TextStyle(
-              fontSize: 13,
-              color: Color(0xFF1F2937),
-              fontWeight: FontWeight.w600,
+            style: GoogleFonts.nunito(
+              fontSize: 14,
+              color: const Color(0xFF1F2937),
+              fontWeight: FontWeight.w700,
             ),
           ),
         ],
@@ -308,12 +389,12 @@ class _GuestLandingPageState extends State<GuestLandingPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
+          Text(
             'Popular near you',
-            style: TextStyle(
-              fontSize: 16,
-              color: Color(0xFF1F2937),
-              fontWeight: FontWeight.w600,
+            style: GoogleFonts.nunito(
+              fontSize: 17,
+              color: const Color(0xFF1F2937),
+              fontWeight: FontWeight.w800,
             ),
           ),
           const SizedBox(height: 12),
@@ -341,12 +422,13 @@ class _GuestLandingPageState extends State<GuestLandingPage> {
 
   Widget _buildBottomNav() {
     return Container(
+      height: 60, // ← SMALLER height
       decoration: BoxDecoration(
         color: Colors.white,
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
+            color: Colors.black.withOpacity(0.06),
+            blurRadius: 12,
             offset: const Offset(0, -2),
           ),
         ],
@@ -358,26 +440,27 @@ class _GuestLandingPageState extends State<GuestLandingPage> {
         unselectedItemColor: const Color(0xFF9CA3AF),
         currentIndex: _selectedIndex,
         onTap: _onItemTapped,
-        selectedFontSize: 11,
-        unselectedFontSize: 11,
+        selectedFontSize: 10,   // ← smaller font
+        unselectedFontSize: 10,
+        iconSize: 22,           // ← smaller icons
         elevation: 0,
         items: const [
           BottomNavigationBarItem(
             icon: Padding(
-              padding: EdgeInsets.only(bottom: 4),
-              child: Icon(Icons.home_outlined, size: 26),
+              padding: EdgeInsets.only(bottom: 2),
+              child: Icon(Icons.home_outlined, size: 22),
             ),
             activeIcon: Padding(
-              padding: EdgeInsets.only(bottom: 4),
-              child: Icon(Icons.home, size: 26),
+              padding: EdgeInsets.only(bottom: 2),
+              child: Icon(Icons.home, size: 22),
             ),
             label: 'Home',
           ),
           BottomNavigationBarItem(
             icon: Padding(
-              padding: EdgeInsets.only(bottom: 4),
+              padding: EdgeInsets.only(bottom: 2),
               child: _NotificationDot(
-                child: Icon(Icons.calendar_today_outlined, size: 24),
+                child: Icon(Icons.calendar_today_outlined, size: 20),
               ),
             ),
             label: 'Bookings',
@@ -388,18 +471,18 @@ class _GuestLandingPageState extends State<GuestLandingPage> {
           ),
           BottomNavigationBarItem(
             icon: Padding(
-              padding: EdgeInsets.only(bottom: 4),
+              padding: EdgeInsets.only(bottom: 2),
               child: _NotificationDot(
-                child: Icon(Icons.notifications_outlined, size: 26),
+                child: Icon(Icons.notifications_outlined, size: 22),
               ),
             ),
             label: 'Alerts',
           ),
           BottomNavigationBarItem(
             icon: Padding(
-              padding: EdgeInsets.only(bottom: 4),
+              padding: EdgeInsets.only(bottom: 2),
               child: _NotificationDot(
-                child: Icon(Icons.person_outline, size: 26),
+                child: Icon(Icons.person_outline, size: 22),
               ),
             ),
             label: 'Profile',
@@ -410,39 +493,7 @@ class _GuestLandingPageState extends State<GuestLandingPage> {
   }
 }
 
-// Optimized Widgets
-
-class _LoginButton extends StatelessWidget {
-  final VoidCallback onTap;
-  const _LoginButton({required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(20),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(20),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: const Color(0xFFE5E7EB), width: 1.5),
-          ),
-          child: const Text(
-            'Login',
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-              color: Color(0xFF7C3FED),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
+// ── Reusable Widgets ──────────────────────────────────────────
 
 class _GetHelpButton extends StatelessWidget {
   final VoidCallback onTap;
@@ -463,17 +514,25 @@ class _GetHelpButton extends StatelessWidget {
             gradient: const LinearGradient(
               colors: [Color(0xFF00D68F), Color(0xFF00C782)],
             ),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFF00D68F).withOpacity(0.3),
+                blurRadius: 12,
+                offset: const Offset(0, 6),
+              ),
+            ],
           ),
-          child: const Row(
+          child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(Icons.shopping_bag_outlined, color: Colors.white, size: 22),
-              SizedBox(width: 8),
+              const Icon(Icons.shopping_bag_outlined,
+                  color: Colors.white, size: 22),
+              const SizedBox(width: 8),
               Text(
                 'Get Help Now',
-                style: TextStyle(
+                style: GoogleFonts.nunito(
                   fontSize: 16,
-                  fontWeight: FontWeight.w600,
+                  fontWeight: FontWeight.w800,
                   color: Colors.white,
                 ),
               ),
@@ -506,7 +565,6 @@ class _ServiceCardData {
 class _ServiceRow extends StatelessWidget {
   final _ServiceCardData card1;
   final _ServiceCardData card2;
-
   const _ServiceRow({required this.card1, required this.card2});
 
   @override
@@ -585,24 +643,26 @@ class _ServiceCard extends StatelessWidget {
                             color: data.iconBgColor,
                             borderRadius: BorderRadius.circular(14),
                           ),
-                          child: Icon(data.icon, color: data.iconColor, size: 26),
+                          child: Icon(data.icon,
+                              color: data.iconColor, size: 26),
                         ),
                         const Spacer(),
                         Text(
                           data.title,
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                            color: Color(0xFF1F2937),
+                          style: GoogleFonts.nunito(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w800,
+                            color: const Color(0xFF1F2937),
                           ),
                         ),
-                        const SizedBox(height: 4),
+                        const SizedBox(height: 3),
                         Text(
                           data.subtitle,
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFF9CA3AF),
-                            height: 1.4,
+                          style: GoogleFonts.nunito(
+                            fontSize: 11,
+                            color: const Color(0xFF9CA3AF),
+                            height: 1.3,
+                            fontWeight: FontWeight.w500,
                           ),
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
@@ -669,34 +729,36 @@ class _PopularServiceCard extends StatelessWidget {
                   children: [
                     Text(
                       title,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFF1F2937),
+                      style: GoogleFonts.nunito(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: const Color(0xFF1F2937),
                       ),
                     ),
                     const SizedBox(height: 4),
                     Text(
                       subtitle,
-                      style: const TextStyle(
-                        fontSize: 13,
-                        color: Color(0xFF6B7280),
+                      style: GoogleFonts.nunito(
+                        fontSize: 12,
+                        color: const Color(0xFF6B7280),
+                        fontWeight: FontWeight.w500,
                       ),
                     ),
                   ],
                 ),
               ),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
                   color: const Color(0xFF10B981),
                   borderRadius: BorderRadius.circular(20),
                 ),
-                child: const Text(
+                child: Text(
                   'Available',
-                  style: TextStyle(
+                  style: GoogleFonts.nunito(
                     fontSize: 11,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: FontWeight.w700,
                     color: Colors.white,
                   ),
                 ),
@@ -722,6 +784,13 @@ class _AuthDialog extends StatelessWidget {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 30,
+            offset: const Offset(0, 15),
+          ),
+        ],
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -733,24 +802,25 @@ class _AuthDialog extends StatelessWidget {
               color: Color(0xFFDDD0F8),
               shape: BoxShape.circle,
             ),
-            child: const Icon(Icons.lock_outline, size: 40, color: Color(0xFF6B28EA)),
+            child: const Icon(Icons.lock_outline,
+                size: 40, color: Color(0xFF6B28EA)),
           ),
           const SizedBox(height: 24),
-          const Text(
+          Text(
             'Login Required',
-            style: TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
-              color: Color(0xFF1F2937),
+            style: GoogleFonts.nunito(
+              fontSize: 22,
+              fontWeight: FontWeight.w800,
+              color: const Color(0xFF1F2937),
             ),
           ),
           const SizedBox(height: 12),
-          const Text(
+          Text(
             'Please login or sign up to access this feature',
             textAlign: TextAlign.center,
-            style: TextStyle(
+            style: GoogleFonts.nunito(
               fontSize: 14,
-              color: Color(0xFF6B7280),
+              color: const Color(0xFF6B7280),
               height: 1.5,
             ),
           ),
@@ -763,11 +833,16 @@ class _AuthDialog extends StatelessWidget {
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF7C3FED),
                 elevation: 0,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(25)),
               ),
-              child: const Text(
+              child: Text(
                 'Login',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white),
+                style: GoogleFonts.nunito(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.white,
+                ),
               ),
             ),
           ),
@@ -780,11 +855,15 @@ class _AuthDialog extends StatelessWidget {
               style: OutlinedButton.styleFrom(
                 foregroundColor: const Color(0xFF7C3FED),
                 side: const BorderSide(color: Color(0xFF7C3FED), width: 2),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(25)),
               ),
-              child: const Text(
+              child: Text(
                 'Sign Up',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                style: GoogleFonts.nunito(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ),
           ),
@@ -808,8 +887,8 @@ class _NotificationDot extends StatelessWidget {
           right: -2,
           top: -2,
           child: SizedBox(
-            width: 8,
-            height: 8,
+            width: 7,
+            height: 7,
             child: DecoratedBox(
               decoration: BoxDecoration(
                 color: Color(0xFFEF4444),
@@ -829,8 +908,8 @@ class _SOSButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 56,
-      height: 56,
+      width: 48,   // ← smaller SOS button
+      height: 48,
       decoration: const BoxDecoration(
         gradient: LinearGradient(
           colors: [Color(0xFFEF4444), Color(0xFFDC2626)],
@@ -842,7 +921,7 @@ class _SOSButton extends StatelessWidget {
           'SOS',
           style: TextStyle(
             color: Colors.white,
-            fontSize: 16,
+            fontSize: 14,
             fontWeight: FontWeight.bold,
             letterSpacing: 0.5,
           ),
@@ -852,7 +931,7 @@ class _SOSButton extends StatelessWidget {
   }
 }
 
-// Placeholder SignUp Page
+// Placeholder Sign Up Page
 class SignUpPage extends StatelessWidget {
   const SignUpPage({super.key});
 
