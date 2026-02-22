@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Trouble Sarthi</string>
+
+    <!--
+        REPLACE with your actual Facebook App ID from:
+        https://developers.facebook.com → Your App → Settings → Basic
+    -->
+    <string name="facebook_app_id">776722085487989</string>
+
+    <!--
+        REPLACE with your actual Facebook Client Token from:
+        https://developers.facebook.com → Your App → Settings → Advanced → Client Token
+    -->
+    <string name="facebook_client_token">7e1e20a6f7a8e20a43b83f3f13f53695</string>
+</resources>

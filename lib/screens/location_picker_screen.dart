@@ -4,7 +4,12 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geocoding/geocoding.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:uuid/uuid.dart';
 import '../service/location_controller.dart';
+import '../models/location_model.dart';
+import 'home_screen.dart';
 
 class LocationPickerScreen extends StatefulWidget {
   const LocationPickerScreen({super.key});
@@ -28,9 +33,7 @@ class _LocationPickerScreenState extends State<LocationPickerScreen> {
             onPressed: () => Navigator.pop(context),
           ),
         ),
-        body: const Center(
-          child: Text('Maps only work on mobile'),
-        ),
+        body: const Center(child: Text('Maps only work on mobile')),
       );
     }
     return const _MobileLocationPicker();
@@ -56,12 +59,12 @@ class _MobileLocationPickerState extends State<_MobileLocationPicker>
   List<Location> _suggestions = [];
   bool _showSuggestions = false;
   bool _isSearching = false;
+  bool _isSavingToFirestore = false;
 
-  // ✅ SATELLITE TOGGLE STATE
   MapType _mapType = MapType.normal;
 
   static const _initialCamera = CameraPosition(
-    target: LatLng(21.1702, 72.8311), // Surat
+    target: LatLng(21.1702, 72.8311),
     zoom: 15.0,
   );
 
@@ -167,12 +170,7 @@ class _MobileLocationPickerState extends State<_MobileLocationPicker>
         });
       }
     } catch (_) {
-      if (mounted) {
-        setState(() {
-          _suggestions = [];
-          _showSuggestions = false;
-        });
-      }
+      if (mounted) setState(() { _suggestions = []; _showSuggestions = false; });
     } finally {
       if (mounted) setState(() => _isSearching = false);
     }
@@ -187,25 +185,121 @@ class _MobileLocationPickerState extends State<_MobileLocationPicker>
     _controller.onCameraIdle(LatLng(loc.latitude, loc.longitude));
   }
 
+  // ── Confirm: save via controller then also update Firestore user doc ──────
+
   Future<void> _confirm() async {
     final ok = await _controller.confirmLocation();
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Row(children: [
-        Icon(ok ? Icons.check_circle : Icons.error_outline,
-            color: Colors.white, size: 20),
-        const SizedBox(width: 10),
-        Text(
-          ok ? 'Location saved!' : (_controller.errorMessage ?? 'Save failed.'),
-          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
-        ),
-      ]),
-      backgroundColor: ok ? const Color(0xFF6B5CE7) : Colors.redAccent,
-      behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      margin: const EdgeInsets.all(16),
-    ));
-    if (ok) Navigator.pop(context, _controller.selectedLocation);
+
+    if (!ok) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Row(children: [
+          const Icon(Icons.error_outline, color: Colors.white, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              _controller.errorMessage ?? 'Save failed.',
+              style: const TextStyle(
+                  color: Colors.white, fontWeight: FontWeight.w600),
+            ),
+          ),
+        ]),
+        backgroundColor: Colors.redAccent,
+        behavior: SnackBarBehavior.floating,
+        shape:
+        RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        margin: const EdgeInsets.all(16),
+      ));
+      return;
+    }
+
+    // Also update /users/{uid} primaryLocation + locationSet
+    await _saveLocationToUserDoc();
+  }
+
+  Future<void> _saveLocationToUserDoc() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      _navigateToHome();
+      return;
+    }
+
+    setState(() => _isSavingToFirestore = true);
+
+    try {
+      final selected = _controller.selectedLocation;
+      if (selected == null) {
+        _navigateToHome();
+        return;
+      }
+
+      final location = LocationModel(
+        id: const Uuid().v4(),
+        latitude: selected.latitude,
+        longitude: selected.longitude,
+        streetAddress: selected.streetAddress,
+        subLocality: selected.subLocality,
+        city: selected.city,
+        state: selected.state,
+        postalCode: selected.postalCode,
+        country: selected.country,
+        label: _controller.selectedLabel,
+        savedAt: DateTime.now(),
+      );
+
+      final userRef =
+      FirebaseFirestore.instance.collection('users').doc(user.uid);
+
+      // Save to sub-collection
+      await userRef
+          .collection('locations')
+          .doc(location.id)
+          .set(location.toFirestore());
+
+      // Update user doc
+      await userRef.update({
+        'primaryLocation': location.toFirestore(),
+        'locationSet': true,
+        'locationUpdatedAt': FieldValue.serverTimestamp(),
+      });
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: const Row(children: [
+          Icon(Icons.check_circle, color: Colors.white, size: 20),
+          SizedBox(width: 10),
+          Text('Location saved!',
+              style: TextStyle(
+                  color: Colors.white, fontWeight: FontWeight.w600)),
+        ]),
+        backgroundColor: const Color(0xFF6B5CE7),
+        behavior: SnackBarBehavior.floating,
+        shape:
+        RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        margin: const EdgeInsets.all(16),
+      ));
+
+      _navigateToHome();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isSavingToFirestore = false);
+      // Still navigate to home even if Firestore update fails
+      _navigateToHome();
+    }
+  }
+
+  void _navigateToHome() {
+    Navigator.pushAndRemoveUntil(
+      context,
+      PageRouteBuilder(
+        pageBuilder: (_, animation, __) => const HomeScreen(),
+        transitionsBuilder: (_, animation, __, child) =>
+            FadeTransition(opacity: animation, child: child),
+        transitionDuration: const Duration(milliseconds: 350),
+      ),
+          (route) => false,
+    );
   }
 
   @override
@@ -230,15 +324,14 @@ class _MobileLocationPickerState extends State<_MobileLocationPicker>
             compassEnabled: true,
             mapToolbarEnabled: false,
             padding: EdgeInsets.only(bottom: sheetH),
-            mapType: _mapType, // ✅ THIS CONTROLS SATELLITE/NORMAL
+            mapType: _mapType,
             zoomGesturesEnabled: true,
             scrollGesturesEnabled: true,
             tiltGesturesEnabled: true,
             rotateGesturesEnabled: true,
             gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
               Factory<OneSequenceGestureRecognizer>(
-                    () => EagerGestureRecognizer(),
-              ),
+                      () => EagerGestureRecognizer()),
             },
           ),
 
@@ -314,7 +407,8 @@ class _MobileLocationPickerState extends State<_MobileLocationPicker>
                               width: 18,
                               height: 18,
                               child: CircularProgressIndicator(
-                                  strokeWidth: 2, color: Color(0xFF6B5CE7)))
+                                  strokeWidth: 2,
+                                  color: Color(0xFF6B5CE7)))
                               : GestureDetector(
                             onTap: () {
                               _searchCtrl.clear();
@@ -352,8 +446,8 @@ class _MobileLocationPickerState extends State<_MobileLocationPicker>
                         shrinkWrap: true,
                         physics: const NeverScrollableScrollPhysics(),
                         itemCount: _suggestions.length.clamp(0, 4),
-                        separatorBuilder: (_, __) =>
-                        const Divider(height: 1, color: Color(0xFFF1F3F5)),
+                        separatorBuilder: (_, __) => const Divider(
+                            height: 1, color: Color(0xFFF1F3F5)),
                         itemBuilder: (_, i) {
                           final loc = _suggestions[i];
                           return ListTile(
@@ -364,7 +458,8 @@ class _MobileLocationPickerState extends State<_MobileLocationPicker>
                               '${loc.latitude.toStringAsFixed(4)}, '
                                   '${loc.longitude.toStringAsFixed(4)}',
                               style: const TextStyle(
-                                  fontSize: 13, fontWeight: FontWeight.w500),
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w500),
                             ),
                             onTap: () => _selectSuggestion(loc),
                           );
@@ -376,7 +471,7 @@ class _MobileLocationPickerState extends State<_MobileLocationPicker>
             ),
           ),
 
-          // "SET LOCATION" BUBBLE
+          // SET LOCATION BUBBLE
           Positioned(
             left: 0,
             right: 0,
@@ -384,7 +479,8 @@ class _MobileLocationPickerState extends State<_MobileLocationPicker>
             child: IgnorePointer(
               child: Center(
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 18, vertical: 10),
                   decoration: BoxDecoration(
                     color: const Color(0xFF6B5CE7),
                     borderRadius: BorderRadius.circular(24),
@@ -407,10 +503,10 @@ class _MobileLocationPickerState extends State<_MobileLocationPicker>
             ),
           ),
 
-          // ✅✅✅ SATELLITE TOGGLE BUTTON (TOP BUTTON) ✅✅✅
+          // SATELLITE TOGGLE
           Positioned(
             right: 16,
-            bottom: sheetH + 80, // Above GPS button
+            bottom: sheetH + 80,
             child: Material(
               color: Colors.transparent,
               child: InkWell(
@@ -451,7 +547,7 @@ class _MobileLocationPickerState extends State<_MobileLocationPicker>
             ),
           ),
 
-          // GPS BUTTON (BOTTOM BUTTON)
+          // GPS BUTTON
           Positioned(
             right: 16,
             bottom: sheetH + 16,
@@ -480,7 +576,8 @@ class _MobileLocationPickerState extends State<_MobileLocationPicker>
                           width: 22,
                           height: 22,
                           child: CircularProgressIndicator(
-                              strokeWidth: 2.5, color: Color(0xFF6B5CE7))))
+                              strokeWidth: 2.5,
+                              color: Color(0xFF6B5CE7))))
                       : const Icon(Icons.my_location_rounded,
                       color: Color(0xFF6B5CE7), size: 26),
                 ),
@@ -495,7 +592,7 @@ class _MobileLocationPickerState extends State<_MobileLocationPicker>
               address: _controller.displayAddress,
               subAddress: _controller.displaySubAddress,
               isLoading: _controller.isLoading,
-              isSaving: _controller.isSaving,
+              isSaving: _controller.isSaving || _isSavingToFirestore,
               selectedLabel: _controller.selectedLabel,
               onLabelSelected: _controller.selectLabel,
               onChangeTap: _goToCurrent,
@@ -508,6 +605,8 @@ class _MobileLocationPickerState extends State<_MobileLocationPicker>
     );
   }
 }
+
+// ── Widgets (unchanged) ───────────────────────────────────────────────────────
 
 class _MapPin extends StatelessWidget {
   const _MapPin();
@@ -529,7 +628,8 @@ class _MapPin extends StatelessWidget {
                   offset: const Offset(0, 6)),
             ],
           ),
-          child: const Icon(Icons.location_on_rounded, color: Colors.white, size: 26),
+          child:
+          const Icon(Icons.location_on_rounded, color: Colors.white, size: 26),
         ),
         CustomPaint(size: const Size(16, 10), painter: _TailPainter()),
         Container(
@@ -589,7 +689,9 @@ class _BottomSheet extends StatelessWidget {
         borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
         boxShadow: [
           BoxShadow(
-              color: Color(0x1A000000), blurRadius: 30, offset: Offset(0, -8)),
+              color: Color(0x1A000000),
+              blurRadius: 30,
+              offset: Offset(0, -8)),
         ],
       ),
       child: Column(
@@ -655,8 +757,8 @@ class _BottomSheet extends StatelessWidget {
                 TextButton(
                   onPressed: onChangeTap,
                   style: TextButton.styleFrom(
-                      padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4)),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4)),
                   child: const Text('Change',
                       style: TextStyle(
                           color: Color(0xFF6B5CE7),
@@ -687,16 +789,17 @@ class _BottomSheet extends StatelessWidget {
                 const SizedBox(width: 10),
                 _Chip(
                     icon: Icons.add_rounded,
-                    label: 'Add',
-                    value: 'custom',
-                    selected: selectedLabel == 'custom',
-                    onTap: () => onLabelSelected('custom')),
+                    label: 'Other',
+                    value: 'other',
+                    selected: selectedLabel == 'other',
+                    onTap: () => onLabelSelected('other')),
               ],
             ),
           ),
           const SizedBox(height: 20),
           Padding(
-            padding: EdgeInsets.only(left: 24, right: 24, bottom: safeBottom + 20),
+            padding: EdgeInsets.only(
+                left: 24, right: 24, bottom: safeBottom + 20),
             child: SizedBox(
               width: double.infinity,
               height: 56,
@@ -765,7 +868,8 @@ class _Chip extends StatelessWidget {
               : const Color(0xFFF8F9FA),
           borderRadius: BorderRadius.circular(50),
           border: Border.all(
-            color: selected ? const Color(0xFF6B5CE7) : const Color(0xFFE9ECEF),
+            color:
+            selected ? const Color(0xFF6B5CE7) : const Color(0xFFE9ECEF),
             width: selected ? 1.5 : 1,
           ),
         ),
@@ -774,13 +878,15 @@ class _Chip extends StatelessWidget {
           children: [
             Icon(icon,
                 size: 16,
-                color:
-                selected ? const Color(0xFF6B5CE7) : const Color(0xFF6C757D)),
+                color: selected
+                    ? const Color(0xFF6B5CE7)
+                    : const Color(0xFF6C757D)),
             const SizedBox(width: 6),
             Text(label,
                 style: TextStyle(
                     fontSize: 13,
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                    fontWeight:
+                    selected ? FontWeight.w600 : FontWeight.w500,
                     color: selected
                         ? const Color(0xFF6B5CE7)
                         : const Color(0xFF495057))),
@@ -799,7 +905,8 @@ class _Shimmer extends StatefulWidget {
   State<_Shimmer> createState() => _ShimmerState();
 }
 
-class _ShimmerState extends State<_Shimmer> with SingleTickerProviderStateMixin {
+class _ShimmerState extends State<_Shimmer>
+    with SingleTickerProviderStateMixin {
   late AnimationController _c;
   late Animation<double> _a;
 
@@ -827,8 +934,8 @@ class _ShimmerState extends State<_Shimmer> with SingleTickerProviderStateMixin 
       height: widget.height,
       margin: const EdgeInsets.only(top: 2),
       decoration: BoxDecoration(
-        color: Color.lerp(
-            const Color(0xFFE9ECEF), const Color(0xFFF8F9FA), _a.value),
+        color: Color.lerp(const Color(0xFFE9ECEF),
+            const Color(0xFFF8F9FA), _a.value),
         borderRadius: BorderRadius.circular(6),
       ),
     ),

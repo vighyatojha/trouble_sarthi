@@ -1,3 +1,5 @@
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../models/location_model.dart';
@@ -30,6 +32,14 @@ class LocationController extends ChangeNotifier {
 
   LocationModel? get selectedLocation => _resolvedLocation;
   LocationModel? get currentLocation  => _resolvedLocation;
+
+  // ── Get current Firebase uid safely ──────────────────────────────────────
+
+  String get _currentUserId {
+    return FirebaseAuth.instance.currentUser?.uid ?? 'anonymous';
+  }
+
+  // ── Initialize ────────────────────────────────────────────────────────────
 
   Future<void> initialize() async {
     _setGeocoding(true);
@@ -87,31 +97,37 @@ class LocationController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<bool> confirmLocation({String userId = 'anonymous'}) async {
+  // ── confirmLocation: always uses real Firebase uid ────────────────────────
+
+  Future<bool> confirmLocation() async {
     if (_resolvedLocation == null) return false;
 
     _isSaving = true;
     _errorMessage = null;
     notifyListeners();
 
+    final uid = _currentUserId;
+
     try {
-      final locationToSave =
-      _resolvedLocation!.copyWith(label: _selectedLabel);
+      final locationToSave = _resolvedLocation!.copyWith(label: _selectedLabel);
 
       final ok = await _dbSvc.saveActiveLocation(
-        userId: userId,
+        userId: uid,
         location: locationToSave,
       );
 
       if (_selectedLabel != 'other') {
         await _dbSvc.savePinnedPlace(
-          userId: userId,
+          userId: uid,
           location: locationToSave,
         );
       }
 
       if (!ok) _errorMessage = 'Save failed. Check your connection.';
       return ok;
+    } on FirebaseException catch (e) {
+      _errorMessage = 'Firebase error: ${e.message}';
+      return false;
     } catch (e) {
       _errorMessage = 'Save error: $e';
       return false;
