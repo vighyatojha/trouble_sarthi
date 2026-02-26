@@ -1,9 +1,12 @@
 // ignore_for_file: use_build_context_synchronously
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:trouble_sarthi/screens/about_screen.dart';
+import 'package:trouble_sarthi/service/firebase_storage_service.dart';
+import 'package:trouble_sarthi/service/image_picker_service.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  PROFILE COMPLETION CONFIG
@@ -113,7 +116,7 @@ class ProfileScreen extends StatelessWidget {
                         items: [
                           _GItem(Icons.history_rounded, 'Activity', 'Your bookings & history',
                                   () => _push(ctx, const ActivityScreen())),
-                          _GItem(Icons.account_balance_wallet_rounded, 'Payments', 'Wallet & transactions',
+                          _GItem(Icons.receipt_long_rounded, 'Payments', 'Cash & UPI payment history',
                               isLast: true,
                                   () => _push(ctx, const PaymentsScreen())),
                         ],
@@ -594,7 +597,19 @@ class _LogOut extends StatelessWidget {
 // ═══════════════════════════════════════════════════════════════════════════
 //  EDIT PROFILE SHEET
 // ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+//  EDIT PROFILE SHEET
+//
+//  - Fetches LIVE from Firestore on open (never stale)
+//  - Validates name (required), phone (digits only), emergency (digits only)
+//  - Email shown as read-only info (Firebase requires re-auth to change email)
+//  - Writes every field with merge:true so unrelated fields are never wiped
+//  - Updates Firebase Auth displayName in parallel
+//  - Shows green success banner before closing
+// ═══════════════════════════════════════════════════════════════════════════
 class EditProfileSheet extends StatefulWidget {
+  // data + user still accepted so callers don't need to change,
+  // but we always re-fetch fresh from Firestore inside initState.
   final Map<String, dynamic> data;
   final User? user;
   const EditProfileSheet({super.key, required this.data, required this.user});
@@ -604,159 +619,642 @@ class EditProfileSheet extends StatefulWidget {
 }
 
 class _EditProfileSheetState extends State<EditProfileSheet> {
-  late final TextEditingController _name, _email, _phone, _dob, _emergency;
+  // Controllers
+  final _nameCtrl      = TextEditingController();
+  final _phoneCtrl     = TextEditingController();
+  final _dobCtrl       = TextEditingController();
+  final _emergencyCtrl = TextEditingController();
+
   String? _gender;
-  bool _saving = false;
+  bool _loading  = true; // true while fetching fresh data from Firestore
+  bool _saving   = false;
+  bool _saved    = false; // shows success banner
+
+  // ── Photo state ────────────────────────────────────────────────────────────
+  File?   _pickedImage;           // local file chosen by user
+  String  _existingPhotoUrl = ''; // current URL from Firestore/Auth
+  bool    _uploadingPhoto   = false;
+  double  _uploadProgress   = 0.0;
+
+  // Validation error strings (null = no error)
+  String? _nameErr, _phoneErr, _emergencyErr;
 
   @override
   void initState() {
     super.initState();
-    final d = widget.data; final u = widget.user;
-    _name      = TextEditingController(text: d['name']             as String? ?? u?.displayName ?? '');
-    _email     = TextEditingController(text: d['email']            as String? ?? u?.email        ?? '');
-    _phone     = TextEditingController(text: d['phone']            as String? ?? u?.phoneNumber  ?? '');
-    _dob       = TextEditingController(text: d['dob']              as String? ?? '');
-    _emergency = TextEditingController(text: d['emergencyContact'] as String? ?? '');
-    _gender    = d['gender'] as String?;
+    _fetchAndFill();
   }
 
   @override
   void dispose() {
-    _name.dispose(); _email.dispose(); _phone.dispose();
-    _dob.dispose(); _emergency.dispose();
+    _nameCtrl.dispose();
+    _phoneCtrl.dispose();
+    _dobCtrl.dispose();
+    _emergencyCtrl.dispose();
     super.dispose();
   }
 
-  Future<void> _save() async {
-    setState(() => _saving = true);
+  // ── Always fetch fresh Firestore data on open ────────────────────────────
+  Future<void> _fetchAndFill() async {
+    final uid = widget.user?.uid ?? '';
+    if (uid.isEmpty) { setState(() => _loading = false); return; }
+
     try {
-      final uid = widget.user?.uid ?? '';
-      await FirebaseFirestore.instance.collection('users').doc(uid).set({
-        'name': _name.text.trim(), 'email': _email.text.trim(),
-        'phone': _phone.text.trim(), 'dob': _dob.text.trim(),
-        'emergencyContact': _emergency.text.trim(),
-        if (_gender != null) 'gender': _gender,
-        'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-      if (widget.user != null && _name.text.trim().isNotEmpty) {
-        await widget.user!.updateDisplayName(_name.text.trim());
+      final snap = await FirebaseFirestore.instance
+          .collection('users').doc(uid).get();
+      final d = snap.data() ?? {};
+      final u = widget.user;
+
+      // Pre-fill from Firestore, fall back to Firebase Auth fields
+      _nameCtrl.text      = d['name']             as String? ?? u?.displayName ?? '';
+      _phoneCtrl.text     = d['phone']             as String? ?? u?.phoneNumber  ?? '';
+      _dobCtrl.text       = d['dob']               as String? ?? '';
+      _emergencyCtrl.text = d['emergencyContact']  as String? ?? '';
+      _gender             = d['gender']             as String?;
+
+      // Load existing photo — prefer Firestore URL, fallback to Auth photoURL
+      _existingPhotoUrl   = (d['photoUrl']         as String? ?? '').isNotEmpty
+          ? d['photoUrl'] as String
+          : u?.photoURL ?? '';
+    } catch (_) {
+      // If fetch fails, fall back to the passed-in data map
+      final d = widget.data;
+      final u = widget.user;
+      _nameCtrl.text      = d['name']             as String? ?? u?.displayName ?? '';
+      _phoneCtrl.text     = d['phone']             as String? ?? u?.phoneNumber  ?? '';
+      _dobCtrl.text       = d['dob']               as String? ?? '';
+      _emergencyCtrl.text = d['emergencyContact']  as String? ?? '';
+      _gender             = d['gender']             as String?;
+      _existingPhotoUrl   = d['photoUrl']           as String? ?? u?.photoURL ?? '';
+    }
+
+    if (mounted) setState(() => _loading = false);
+  }
+
+  // ── Pick photo from camera or gallery ─────────────────────────────────────
+  Future<void> _pickPhoto() async {
+    final file = await ImagePickerService.instance.pickWithSourceSheet(context);
+    if (file != null && mounted) {
+      setState(() { _pickedImage = file; _uploadingPhoto = false; _uploadProgress = 0.0; });
+    }
+  }
+
+  // ── Upload photo to Firebase Storage, return download URL ─────────────────
+  Future<String?> _uploadPhoto() async {
+    // No new image picked — keep existing
+    if (_pickedImage == null) {
+      return _existingPhotoUrl.isNotEmpty ? _existingPhotoUrl : null;
+    }
+
+    final uid = widget.user?.uid ?? '';
+    if (uid.isEmpty) return null;
+
+    setState(() { _uploadingPhoto = true; _uploadProgress = 0.0; });
+
+    final url = await FirebaseStorageService.instance.uploadProfilePhoto(
+      uid: uid,
+      file: _pickedImage!,
+      onProgress: (p) {
+        if (mounted) setState(() => _uploadProgress = p);
+      },
+    );
+
+    if (mounted) setState(() => _uploadingPhoto = false);
+
+    if (url == null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Photo upload failed. Profile saved without new photo.'),
+          backgroundColor: Color(0xFFD97706),
+        ),
+      );
+    }
+    return url;
+  }
+
+  // ── Validation ────────────────────────────────────────────────────────────
+  bool _validate() {
+    bool ok = true;
+    setState(() {
+      _nameErr      = null;
+      _phoneErr     = null;
+      _emergencyErr = null;
+
+      if (_nameCtrl.text.trim().isEmpty) {
+        _nameErr = 'Full name is required'; ok = false;
+      } else if (_nameCtrl.text.trim().length < 2) {
+        _nameErr = 'Name must be at least 2 characters'; ok = false;
       }
-      if (mounted) Navigator.pop(context);
+
+      final phoneRaw = _phoneCtrl.text.trim().replaceAll(RegExp(r'[\s\-\+]'), '');
+      if (phoneRaw.isNotEmpty && !RegExp(r'^\d{10,13}$').hasMatch(phoneRaw)) {
+        _phoneErr = 'Enter a valid 10-digit phone number'; ok = false;
+      }
+
+      final emRaw = _emergencyCtrl.text.trim().replaceAll(RegExp(r'[\s\-\+]'), '');
+      if (emRaw.isNotEmpty && !RegExp(r'^\d{10,13}$').hasMatch(emRaw)) {
+        _emergencyErr = 'Enter a valid 10-digit number'; ok = false;
+      }
+    });
+    return ok;
+  }
+
+  // ── Save to Firestore ─────────────────────────────────────────────────────
+  Future<void> _save() async {
+    if (!_validate()) return;
+    setState(() => _saving = true);
+
+    try {
+      final uid  = widget.user?.uid ?? '';
+      final name = _nameCtrl.text.trim();
+
+      // 1. Upload photo first (if a new one was picked)
+      final photoUrl = await _uploadPhoto();
+
+      // 2. Write to Firestore with merge — never overwrites unrelated fields
+      await FirebaseFirestore.instance.collection('users').doc(uid).set({
+        'name':             name,
+        'phone':            _phoneCtrl.text.trim(),
+        'dob':              _dobCtrl.text.trim(),
+        'emergencyContact': _emergencyCtrl.text.trim(),
+        if (_gender != null) 'gender': _gender,
+        if (photoUrl != null) 'photoUrl': photoUrl,
+        'updatedAt':        FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      // 3. Sync display name + photo URL to Firebase Auth
+      if (widget.user != null) {
+        if (name.isNotEmpty) await widget.user!.updateDisplayName(name);
+        if (photoUrl != null) await widget.user!.updatePhotoURL(photoUrl);
+        // Reload so currentUser reflects immediately
+        await widget.user!.reload();
+      }
+
+      // 4. Show success banner then close
+      if (mounted) {
+        setState(() { _saving = false; _saved = true; });
+        await Future.delayed(const Duration(milliseconds: 1200));
+        if (mounted) Navigator.pop(context);
+      }
+    } on FirebaseException catch (e) {
+      if (mounted) {
+        setState(() => _saving = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.message ?? 'Failed to save. Please try again.'),
+            backgroundColor: const Color(0xFFDC2626),
+          ),
+        );
+      }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
-    } finally { if (mounted) setState(() => _saving = false); }
+      if (mounted) {
+        setState(() => _saving = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Unexpected error: $e'),
+            backgroundColor: const Color(0xFFDC2626),
+          ),
+        );
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: const BoxDecoration(color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom + 24,
-          left: 24, right: 24),
-      child: SingleChildScrollView(
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Center(child: Container(margin: const EdgeInsets.symmetric(vertical: 12),
-              width: 42, height: 4, decoration: BoxDecoration(
-                  color: const Color(0xFFE5E7EB), borderRadius: BorderRadius.circular(2)))),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(context).viewInsets.bottom + 28,
+        left: 24, right: 24,
+      ),
+      child: _loading
+          ? const Padding(
+        padding: EdgeInsets.symmetric(vertical: 60),
+        child: Center(
+          child: CircularProgressIndicator(color: Color(0xFF7C3AED)),
+        ),
+      )
+          : SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Drag handle
+            Center(
+              child: Container(
+                  margin: const EdgeInsets.symmetric(vertical: 12),
+                  width: 42, height: 4,
+                  decoration: BoxDecoration(
+                      color: const Color(0xFFE5E7EB),
+                      borderRadius: BorderRadius.circular(2))),
+            ),
 
-          Row(children: [
-            Container(width: 46, height: 46,
+            // Header
+            Row(children: [
+              Container(
+                width: 46, height: 46,
                 decoration: BoxDecoration(
-                  gradient: const LinearGradient(colors: [Color(0xFF5B21B6), Color(0xFF7C3AED)],
+                  gradient: const LinearGradient(
+                      colors: [Color(0xFF5B21B6), Color(0xFF7C3AED)],
                       begin: Alignment.topLeft, end: Alignment.bottomRight),
                   borderRadius: BorderRadius.circular(13),
                 ),
-                child: const Icon(Icons.person_rounded, color: Colors.white, size: 24)),
-            const SizedBox(width: 14),
-            const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Edit Profile', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold,
-                  color: Color(0xFF1F2937))),
-              Text('Update your personal details',
-                  style: TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+                child: const Icon(Icons.person_rounded, color: Colors.white, size: 24),
+              ),
+              const SizedBox(width: 14),
+              const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('Edit Profile',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold,
+                        color: Color(0xFF1F2937))),
+                Text('Changes save directly to your account',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+              ]),
             ]),
-          ]),
 
-          const SizedBox(height: 24),
+            const SizedBox(height: 20),
 
-          _f('Full Name',          _name,      Icons.person_rounded,    'Your full name',       TextInputType.name),
-          _f('Email',              _email,     Icons.email_rounded,     'you@email.com',         TextInputType.emailAddress),
-          _f('Phone Number',       _phone,     Icons.phone_rounded,     '+91 XXXXX XXXXX',       TextInputType.phone),
-          _f('Date of Birth',      _dob,       Icons.cake_rounded,      'e.g. 15 Aug 1998',      TextInputType.datetime,
-              readOnly: true, onTap: () async {
-                final d = await showDatePicker(context: context,
-                    initialDate: DateTime(2000),
-                    firstDate: DateTime(1920), lastDate: DateTime.now());
-                if (d != null) {
-                  const m = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-                  _dob.text = '${d.day} ${m[d.month]} ${d.year}';
-                }
-              }),
-          _f('Emergency Contact',  _emergency, Icons.emergency_rounded, 'Emergency phone number', TextInputType.phone),
-
-          const Text('Gender', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-              color: Color(0xFF374151))),
-          const SizedBox(height: 8),
-          Row(children: ['Male', 'Female', 'Other'].map((g) => Expanded(
-            child: GestureDetector(
-              onTap: () => setState(() => _gender = g),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 150),
-                margin: const EdgeInsets.only(right: 8),
-                padding: const EdgeInsets.symmetric(vertical: 11),
+            // ── Success banner (shown after save) ───────────────────
+            if (_saved)
+              Container(
+                margin: const EdgeInsets.only(bottom: 16),
+                padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
-                  color: _gender == g ? const Color(0xFF7C3AED) : const Color(0xFFF9FAFB),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: _gender == g
-                      ? const Color(0xFF7C3AED) : const Color(0xFFE5E7EB)),
+                  color: const Color(0xFFF0FDF4),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                      color: const Color(0xFF059669).withOpacity(0.30)),
                 ),
-                child: Text(g, textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                        color: _gender == g ? Colors.white : const Color(0xFF6B7280))),
+                child: const Row(children: [
+                  Icon(Icons.check_circle_rounded,
+                      color: Color(0xFF059669), size: 20),
+                  SizedBox(width: 10),
+                  Text('Profile updated successfully!',
+                      style: TextStyle(fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF065F46))),
+                ]),
+              ),
+
+            // ── Profile photo picker ─────────────────────────────────
+            Center(
+              child: GestureDetector(
+                onTap: (_saving || _saved) ? null : _pickPhoto,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    // Avatar circle
+                    Container(
+                      width: 100, height: 100,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: const Color(0xFFEDE9FE),
+                        border: Border.all(
+                            color: const Color(0xFF7C3AED).withOpacity(0.30),
+                            width: 2.5),
+                        image: _pickedImage != null
+                            ? DecorationImage(
+                            image: FileImage(_pickedImage!),
+                            fit: BoxFit.cover)
+                            : _existingPhotoUrl.isNotEmpty
+                            ? DecorationImage(
+                            image: NetworkImage(_existingPhotoUrl),
+                            fit: BoxFit.cover)
+                            : null,
+                      ),
+                      child: (_pickedImage == null && _existingPhotoUrl.isEmpty)
+                          ? const Center(
+                          child: Icon(Icons.person_rounded,
+                              color: Color(0xFF7C3AED), size: 42))
+                          : null,
+                    ),
+
+                    // Upload progress ring overlay
+                    if (_uploadingPhoto)
+                      Positioned.fill(
+                        child: Container(
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Colors.black.withOpacity(0.45),
+                          ),
+                          child: Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                SizedBox(
+                                  width: 32, height: 32,
+                                  child: CircularProgressIndicator(
+                                    value: _uploadProgress,
+                                    color: Colors.white,
+                                    strokeWidth: 3,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  '${(_uploadProgress * 100).toInt()}%',
+                                  style: const TextStyle(
+                                      fontSize: 10,
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.bold),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+
+                    // Edit badge
+                    if (!_uploadingPhoto)
+                      Positioned(
+                        bottom: 2, right: 2,
+                        child: Container(
+                          width: 30, height: 30,
+                          decoration: BoxDecoration(
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFF5B21B6), Color(0xFF7C3AED)],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                            shape: BoxShape.circle,
+                            border: Border.all(color: Colors.white, width: 2),
+                          ),
+                          child: const Icon(Icons.camera_alt_rounded,
+                              color: Colors.white, size: 14),
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ),
-          )).toList()),
 
-          const SizedBox(height: 24),
+            const SizedBox(height: 8),
 
-          SizedBox(width: double.infinity, height: 52,
-            child: ElevatedButton(
-              onPressed: _saving ? null : _save,
-              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF7C3AED),
-                  elevation: 0, shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16))),
-              child: _saving
-                  ? const SizedBox(width: 20, height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : const Text('Save Changes', style: TextStyle(fontSize: 15,
-                  fontWeight: FontWeight.bold, color: Colors.white)),
+            // Hint text under avatar
+            const Center(
+              child: Text(
+                'Tap to change photo',
+                style: TextStyle(fontSize: 11, color: Color(0xFF9CA3AF)),
+              ),
             ),
-          ),
-        ]),
+
+            const SizedBox(height: 18),
+
+            // ── Email — read-only info row ───────────────────────────
+            _infoRow(
+              icon: Icons.email_rounded,
+              label: 'Email Address',
+              value: widget.user?.email ?? widget.data['email'] as String? ?? '—',
+              note: 'Contact support to change your email',
+            ),
+
+            const SizedBox(height: 14),
+
+            // ── Editable fields ──────────────────────────────────────
+            _field(
+              label: 'Full Name',
+              controller: _nameCtrl,
+              icon: Icons.person_rounded,
+              hint: 'Your full name',
+              kb: TextInputType.name,
+              error: _nameErr,
+              onChanged: (_) { if (_nameErr != null) setState(() => _nameErr = null); },
+            ),
+
+            _field(
+              label: 'Phone Number',
+              controller: _phoneCtrl,
+              icon: Icons.phone_rounded,
+              hint: '+91 XXXXX XXXXX',
+              kb: TextInputType.phone,
+              error: _phoneErr,
+              onChanged: (_) { if (_phoneErr != null) setState(() => _phoneErr = null); },
+            ),
+
+            // Date of birth — tap to open picker
+            _field(
+              label: 'Date of Birth',
+              controller: _dobCtrl,
+              icon: Icons.cake_rounded,
+              hint: 'e.g. 15 Aug 1998',
+              kb: TextInputType.datetime,
+              readOnly: true,
+              onTap: () async {
+                // Parse existing value if present
+                DateTime initial = DateTime(2000);
+                try {
+                  if (_dobCtrl.text.isNotEmpty) {
+                    const months = {
+                      'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4,
+                      'May': 5, 'Jun': 6, 'Jul': 7, 'Aug': 8,
+                      'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12,
+                    };
+                    final parts = _dobCtrl.text.split(' ');
+                    if (parts.length == 3) {
+                      initial = DateTime(
+                        int.parse(parts[2]),
+                        months[parts[1]] ?? 1,
+                        int.parse(parts[0]),
+                      );
+                    }
+                  }
+                } catch (_) {}
+                final picked = await showDatePicker(
+                  context: context,
+                  initialDate: initial,
+                  firstDate: DateTime(1920),
+                  lastDate: DateTime.now(),
+                  builder: (ctx, child) => Theme(
+                    data: Theme.of(ctx).copyWith(
+                      colorScheme: const ColorScheme.light(
+                        primary: Color(0xFF7C3AED),
+                        onPrimary: Colors.white,
+                      ),
+                    ),
+                    child: child!,
+                  ),
+                );
+                if (picked != null) {
+                  const m = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                  setState(() =>
+                  _dobCtrl.text = '${picked.day} ${m[picked.month]} ${picked.year}');
+                }
+              },
+            ),
+
+            _field(
+              label: 'Emergency Contact',
+              controller: _emergencyCtrl,
+              icon: Icons.emergency_rounded,
+              hint: 'Emergency phone number',
+              kb: TextInputType.phone,
+              error: _emergencyErr,
+              onChanged: (_) { if (_emergencyErr != null) setState(() => _emergencyErr = null); },
+            ),
+
+            // Gender chips
+            const Text('Gender',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                    color: Color(0xFF374151))),
+            const SizedBox(height: 8),
+            Row(
+              children: ['Male', 'Female', 'Other'].map((g) {
+                final selected = _gender == g;
+                return Expanded(
+                  child: GestureDetector(
+                    onTap: () => setState(() => _gender = g),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 150),
+                      margin: const EdgeInsets.only(right: 8),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      decoration: BoxDecoration(
+                        color: selected
+                            ? const Color(0xFF7C3AED)
+                            : const Color(0xFFF9FAFB),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: selected
+                              ? const Color(0xFF7C3AED)
+                              : const Color(0xFFE5E7EB),
+                        ),
+                      ),
+                      child: Text(g,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: selected
+                                  ? Colors.white
+                                  : const Color(0xFF6B7280))),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+
+            const SizedBox(height: 24),
+
+            // Save button
+            SizedBox(
+              width: double.infinity, height: 52,
+              child: ElevatedButton(
+                onPressed: (_saving || _saved) ? null : _save,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF7C3AED),
+                  disabledBackgroundColor: _saved
+                      ? const Color(0xFF059669)
+                      : const Color(0xFFE5E7EB),
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16)),
+                ),
+                child: _saving
+                    ? const SizedBox(width: 20, height: 20,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Colors.white))
+                    : Text(
+                  _saved ? '✓ Saved!' : 'Save Changes',
+                  style: const TextStyle(fontSize: 15,
+                      fontWeight: FontWeight.bold, color: Colors.white),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _f(String label, TextEditingController c, IconData icon, String hint,
-      TextInputType kb, {bool readOnly = false, VoidCallback? onTap}) {
+  // ── Email read-only info row ──────────────────────────────────────────────
+  Widget _infoRow({
+    required IconData icon,
+    required String label,
+    required String value,
+    required String note,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF9FAFB),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+      ),
+      child: Row(children: [
+        Icon(icon, color: const Color(0xFF9CA3AF), size: 18),
+        const SizedBox(width: 12),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(label,
+              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                  color: Color(0xFF9CA3AF))),
+          const SizedBox(height: 2),
+          Text(value,
+              style: const TextStyle(fontSize: 14, color: Color(0xFF6B7280))),
+          const SizedBox(height: 2),
+          Text(note,
+              style: const TextStyle(fontSize: 10, color: Color(0xFFB0B8CC))),
+        ])),
+        const Icon(Icons.lock_outline_rounded, color: Color(0xFFD1D5DB), size: 16),
+      ]),
+    );
+  }
+
+  // ── Editable field ────────────────────────────────────────────────────────
+  Widget _field({
+    required String label,
+    required TextEditingController controller,
+    required IconData icon,
+    required String hint,
+    required TextInputType kb,
+    String? error,
+    bool readOnly = false,
+    VoidCallback? onTap,
+    ValueChanged<String>? onChanged,
+  }) {
+    final hasError = error != null && error.isNotEmpty;
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-            color: Color(0xFF374151))),
+        Text(label,
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                color: Color(0xFF374151))),
         const SizedBox(height: 6),
         TextField(
-          controller: c, keyboardType: kb, readOnly: readOnly, onTap: onTap,
+          controller: controller,
+          keyboardType: kb,
+          readOnly: readOnly,
+          onTap: onTap,
+          onChanged: onChanged,
+          textCapitalization: kb == TextInputType.name
+              ? TextCapitalization.words : TextCapitalization.none,
           style: const TextStyle(fontSize: 14, color: Color(0xFF1F2937)),
           decoration: InputDecoration(
-            hintText: hint, hintStyle: const TextStyle(color: Color(0xFFD1D5DB), fontSize: 13),
-            prefixIcon: Icon(icon, color: const Color(0xFF7C3AED), size: 18),
-            filled: true, fillColor: const Color(0xFFF9FAFB),
+            hintText: hint,
+            hintStyle: const TextStyle(color: Color(0xFFD1D5DB), fontSize: 13),
+            prefixIcon: Icon(icon,
+                color: hasError ? const Color(0xFFDC2626) : const Color(0xFF7C3AED),
+                size: 18),
+            filled: true,
+            fillColor: hasError ? const Color(0xFFFEF2F2) : const Color(0xFFF9FAFB),
             contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14),
-                borderSide: const BorderSide(color: Color(0xFFE5E7EB))),
-            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14),
-                borderSide: const BorderSide(color: Color(0xFF7C3AED), width: 1.5)),
+            errorText: error,
+            errorStyle: const TextStyle(fontSize: 11, color: Color(0xFFDC2626)),
+            enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: BorderSide(
+                    color: hasError ? const Color(0xFFDC2626) : const Color(0xFFE5E7EB))),
+            focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: BorderSide(
+                    color: hasError ? const Color(0xFFDC2626) : const Color(0xFF7C3AED),
+                    width: 1.5)),
+            errorBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: const BorderSide(color: Color(0xFFDC2626))),
+            focusedErrorBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: const BorderSide(color: Color(0xFFDC2626), width: 1.5)),
           ),
         ),
       ]),
@@ -766,6 +1264,12 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  CHANGE PASSWORD SHEET
+//
+//  3 locked stages — each must pass before the next unlocks:
+//  Stage 1 → Enter current password → "Verify" hits Firebase re-auth
+//  Stage 2 → Enter new password     → validated live (length, strength rules)
+//  Stage 3 → Confirm new password   → character-by-character match check
+//  Final   → "Update Password" calls Firebase updatePassword()
 // ═══════════════════════════════════════════════════════════════════════════
 class ChangePasswordSheet extends StatefulWidget {
   const ChangePasswordSheet({super.key});
@@ -775,157 +1279,652 @@ class ChangePasswordSheet extends StatefulWidget {
 }
 
 class _ChangePasswordSheetState extends State<ChangePasswordSheet> {
-  final _cur = TextEditingController();
-  final _new = TextEditingController();
-  final _con = TextEditingController();
-  bool _sCur = false, _sNew = false, _sCon = false, _saving = false;
+  // Controllers
+  final _curCtrl = TextEditingController();
+  final _newCtrl = TextEditingController();
+  final _conCtrl = TextEditingController();
 
-  @override
-  void dispose() { _cur.dispose(); _new.dispose(); _con.dispose(); super.dispose(); }
+  // Visibility toggles
+  bool _showCur = false, _showNew = false, _showCon = false;
 
+  // Stage: 0 = verify current | 1 = new password | 2 = confirm | 3 = done
+  int _stage = 0;
+
+  // Stage-specific state
+  bool _verifying  = false; // spinner while re-authing
+  bool _curError   = false; // current password wrong flag
+  String _curErrMsg = '';
+
+  bool _submitting = false; // final update spinner
+
+  // New password validation
+  static const _minLen = 8;
+  bool get _hasMinLen   => _newCtrl.text.length >= _minLen;
+  bool get _hasUpper    => _newCtrl.text.contains(RegExp(r'[A-Z]'));
+  bool get _hasDigit    => _newCtrl.text.contains(RegExp(r'[0-9]'));
+  bool get _hasSpecial  => _newCtrl.text.contains(RegExp(r'[!@#\$%^&*()_\-+=]'));
+  bool get _newValid    => _hasMinLen && _hasUpper && _hasDigit;
+
+  // Confirm match
+  bool get _conMatch =>
+      _conCtrl.text.isNotEmpty && _conCtrl.text == _newCtrl.text;
+  bool get _conMismatch =>
+      _conCtrl.text.isNotEmpty && _conCtrl.text != _newCtrl.text;
+
+  // Strength 0-4
   int get _strength {
-    final p = _new.text;
     int s = 0;
-    if (p.length >= 6) s++;
-    if (p.length >= 10) s++;
-    if (p.contains(RegExp(r'[A-Z]'))) s++;
-    if (p.contains(RegExp(r'[0-9]'))) s++;
-    if (p.contains(RegExp(r'[!@#\$%^&*]'))) s++;
+    if (_hasMinLen)  s++;
+    if (_hasUpper)   s++;
+    if (_hasDigit)   s++;
+    if (_hasSpecial) s++;
     return s;
   }
 
-  Future<void> _submit() async {
-    if (_new.text != _con.text) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Passwords do not match'))); return;
-    }
-    if (_new.text.length < 6) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Minimum 6 characters required'))); return;
-    }
-    setState(() => _saving = true);
+  @override
+  void dispose() {
+    _curCtrl.dispose(); _newCtrl.dispose(); _conCtrl.dispose();
+    super.dispose();
+  }
+
+  // ── Stage 1: verify current password against Firebase ───────────────────
+  Future<void> _verifyCurrent() async {
+    if (_curCtrl.text.isEmpty) return;
+    setState(() { _verifying = true; _curError = false; _curErrMsg = ''; });
     try {
-      final u = FirebaseAuth.instance.currentUser!;
-      await u.reauthenticateWithCredential(
-          EmailAuthProvider.credential(email: u.email!, password: _cur.text));
-      await u.updatePassword(_new.text);
-      if (mounted) {
-        Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Password updated!')));
-      }
+      final u    = FirebaseAuth.instance.currentUser!;
+      final cred = EmailAuthProvider.credential(
+          email: u.email!, password: _curCtrl.text.trim());
+      await u.reauthenticateWithCredential(cred);
+      // ✅ Correct — advance to stage 1
+      if (mounted) setState(() { _stage = 1; _verifying = false; });
     } on FirebaseAuthException catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message ?? 'Error')));
-    } finally { if (mounted) setState(() => _saving = false); }
+      if (mounted) setState(() {
+        _verifying = false;
+        _curError  = true;
+        _curErrMsg = e.code == 'wrong-password'
+            ? 'Incorrect password. Please try again.'
+            : e.code == 'too-many-requests'
+            ? 'Too many attempts. Please wait and try again.'
+            : e.message ?? 'Verification failed.';
+      });
+    }
+  }
+
+  // ── Stage 2: new password validated — advance to confirm ────────────────
+  void _advanceToConfirm() {
+    if (!_newValid) return;
+    setState(() => _stage = 2);
+  }
+
+  // ── Stage 3: final update ────────────────────────────────────────────────
+  Future<void> _updatePassword() async {
+    if (!_conMatch) return;
+    setState(() => _submitting = true);
+    try {
+      await FirebaseAuth.instance.currentUser!.updatePassword(_newCtrl.text.trim());
+      if (mounted) setState(() { _stage = 3; _submitting = false; });
+    } on FirebaseAuthException catch (e) {
+      if (mounted) {
+        setState(() => _submitting = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(e.message ?? 'Error updating password')));
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: const BoxDecoration(color: Colors.white,
+      decoration: const BoxDecoration(
+          color: Colors.white,
           borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+      padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom + 28,
           left: 24, right: 24),
       child: SingleChildScrollView(
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Center(child: Container(margin: const EdgeInsets.symmetric(vertical: 12),
-              width: 42, height: 4, decoration: BoxDecoration(
-                  color: const Color(0xFFE5E7EB), borderRadius: BorderRadius.circular(2)))),
-          Row(children: [
-            Container(width: 46, height: 46,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Drag handle
+            Center(
+              child: Container(
+                  margin: const EdgeInsets.symmetric(vertical: 12),
+                  width: 42, height: 4,
+                  decoration: BoxDecoration(
+                      color: const Color(0xFFE5E7EB),
+                      borderRadius: BorderRadius.circular(2))),
+            ),
+
+            // Header
+            Row(children: [
+              Container(
+                width: 46, height: 46,
                 decoration: BoxDecoration(
-                  gradient: const LinearGradient(colors: [Color(0xFF1E40AF), Color(0xFF3B82F6)],
-                      begin: Alignment.topLeft, end: Alignment.bottomRight),
+                  gradient: LinearGradient(
+                    colors: _stage == 3
+                        ? [const Color(0xFF059669), const Color(0xFF0D9488)]
+                        : [const Color(0xFF1E40AF), const Color(0xFF3B82F6)],
+                    begin: Alignment.topLeft, end: Alignment.bottomRight,
+                  ),
                   borderRadius: BorderRadius.circular(13),
                 ),
-                child: const Icon(Icons.lock_rounded, color: Colors.white, size: 24)),
-            const SizedBox(width: 14),
-            const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Change Password', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold,
-                  color: Color(0xFF1F2937))),
-              Text('Keep your account secure',
-                  style: TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
-            ]),
-          ]),
-          const SizedBox(height: 24),
-          _pf('Current Password',      _cur, _sCur, () => setState(() => _sCur = !_sCur)),
-          _pf('New Password',          _new, _sNew, () => setState(() => _sNew = !_sNew), onChange: true),
-          _pf('Confirm New Password',  _con, _sCon, () => setState(() => _sCon = !_sCon)),
-
-          if (_new.text.isNotEmpty) ...[
-            Row(children: List.generate(5, (i) => Expanded(
-              child: Container(
-                margin: const EdgeInsets.only(right: 4), height: 4,
-                decoration: BoxDecoration(
-                  color: i < _strength
-                      ? [Colors.red, Colors.orange, Colors.yellow,
-                    Colors.lightGreen, Colors.green][i]
-                      : const Color(0xFFE5E7EB),
-                  borderRadius: BorderRadius.circular(2),
+                child: Icon(
+                  _stage == 3 ? Icons.check_rounded : Icons.lock_rounded,
+                  color: Colors.white, size: 24,
                 ),
               ),
-            ))),
-            const SizedBox(height: 6),
-            Text(
-              ['', 'Weak', 'Fair', 'Good', 'Strong', 'Very Strong'][_strength],
-              style: TextStyle(fontSize: 11, color: [
-                Colors.grey, Colors.red, Colors.orange,
-                Colors.yellow.shade700, Colors.lightGreen, Colors.green
-              ][_strength]),
-            ),
-          ],
+              const SizedBox(width: 14),
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(
+                  _stage == 3 ? 'Password Updated!' : 'Change Password',
+                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold,
+                      color: Color(0xFF1F2937)),
+                ),
+                Text(
+                  _stage == 0 ? 'First, verify it\'s really you'
+                      : _stage == 1 ? 'Choose a strong new password'
+                      : _stage == 2 ? 'Confirm your new password'
+                      : 'Your account is now secured',
+                  style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                ),
+              ]),
+            ]),
 
-          const SizedBox(height: 16),
-          SizedBox(width: double.infinity, height: 52,
-            child: ElevatedButton(
-              onPressed: _saving ? null : _submit,
-              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF1E40AF),
-                  elevation: 0, shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16))),
-              child: _saving
-                  ? const SizedBox(width: 20, height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : const Text('Update Password', style: TextStyle(fontSize: 15,
-                  fontWeight: FontWeight.bold, color: Colors.white)),
-            ),
-          ),
-        ]),
+            const SizedBox(height: 20),
+
+            // ── Stage progress pills ────────────────────────────────────
+            if (_stage < 3)
+              Row(children: List.generate(3, (i) {
+                final active   = i == _stage;
+                final complete = i < _stage;
+                return Expanded(
+                  child: Container(
+                    margin: EdgeInsets.only(right: i < 2 ? 6 : 0),
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: complete
+                          ? const Color(0xFF059669)
+                          : active
+                          ? const Color(0xFF1E40AF)
+                          : const Color(0xFFE5E7EB),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                );
+              })),
+
+            if (_stage < 3) const SizedBox(height: 6),
+            if (_stage < 3)
+              Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                _stageLabel('Verify', 0),
+                _stageLabel('New', 1),
+                _stageLabel('Confirm', 2),
+              ]),
+
+            const SizedBox(height: 24),
+
+            // ── STAGE 0: Verify current password ───────────────────────
+            if (_stage == 0) ...[
+              _fieldLabel('Current Password'),
+              const SizedBox(height: 6),
+              TextField(
+                controller: _curCtrl,
+                obscureText: !_showCur,
+                onChanged: (_) { if (_curError) setState(() => _curError = false); },
+                style: const TextStyle(fontSize: 14, color: Color(0xFF1F2937)),
+                decoration: InputDecoration(
+                  hintText: '••••••••',
+                  hintStyle: const TextStyle(color: Color(0xFFD1D5DB)),
+                  prefixIcon: Icon(Icons.lock_outline_rounded,
+                      color: _curError ? const Color(0xFFDC2626) : const Color(0xFF1E40AF),
+                      size: 18),
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                        _showCur ? Icons.visibility_off_rounded : Icons.visibility_rounded,
+                        color: const Color(0xFF9CA3AF), size: 18),
+                    onPressed: () => setState(() => _showCur = !_showCur),
+                  ),
+                  filled: true,
+                  fillColor: _curError
+                      ? const Color(0xFFFEF2F2) : const Color(0xFFF9FAFB),
+                  contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                  enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide(
+                          color: _curError
+                              ? const Color(0xFFDC2626) : const Color(0xFFE5E7EB))),
+                  focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide(
+                          color: _curError
+                              ? const Color(0xFFDC2626) : const Color(0xFF1E40AF),
+                          width: 1.5)),
+                ),
+              ),
+
+              // Error message
+              if (_curError) ...[
+                const SizedBox(height: 8),
+                Row(children: [
+                  const Icon(Icons.error_outline_rounded,
+                      color: Color(0xFFDC2626), size: 14),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(_curErrMsg,
+                        style: const TextStyle(fontSize: 12,
+                            color: Color(0xFFDC2626))),
+                  ),
+                ]),
+              ],
+
+              const SizedBox(height: 20),
+
+              SizedBox(
+                width: double.infinity, height: 52,
+                child: ElevatedButton(
+                  onPressed: (_verifying || _curCtrl.text.isEmpty) ? null : _verifyCurrent,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF1E40AF),
+                    disabledBackgroundColor: const Color(0xFFE5E7EB),
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16)),
+                  ),
+                  child: _verifying
+                      ? const SizedBox(width: 20, height: 20,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white))
+                      : const Text('Verify Password',
+                      style: TextStyle(fontSize: 15,
+                          fontWeight: FontWeight.bold, color: Colors.white)),
+                ),
+              ),
+            ],
+
+            // ── STAGE 1: New password + live validation ─────────────────
+            if (_stage == 1) ...[
+              // Green "current verified" chip
+              _VerifiedChip(text: 'Current password verified ✓'),
+              const SizedBox(height: 16),
+
+              _fieldLabel('New Password'),
+              const SizedBox(height: 6),
+              TextField(
+                controller: _newCtrl,
+                obscureText: !_showNew,
+                onChanged: (_) => setState(() {}),
+                autofocus: true,
+                style: const TextStyle(fontSize: 14, color: Color(0xFF1F2937)),
+                decoration: InputDecoration(
+                  hintText: '••••••••',
+                  hintStyle: const TextStyle(color: Color(0xFFD1D5DB)),
+                  prefixIcon: const Icon(Icons.lock_rounded,
+                      color: Color(0xFF1E40AF), size: 18),
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                        _showNew ? Icons.visibility_off_rounded : Icons.visibility_rounded,
+                        color: const Color(0xFF9CA3AF), size: 18),
+                    onPressed: () => setState(() => _showNew = !_showNew),
+                  ),
+                  filled: true, fillColor: const Color(0xFFF9FAFB),
+                  contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                  enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: const BorderSide(color: Color(0xFFE5E7EB))),
+                  focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: const BorderSide(
+                          color: Color(0xFF1E40AF), width: 1.5)),
+                ),
+              ),
+
+              const SizedBox(height: 14),
+
+              // Strength bar
+              if (_newCtrl.text.isNotEmpty) ...[
+                Row(children: List.generate(4, (i) => Expanded(
+                  child: Container(
+                    margin: EdgeInsets.only(right: i < 3 ? 5 : 0),
+                    height: 5,
+                    decoration: BoxDecoration(
+                      color: i < _strength
+                          ? [const Color(0xFFDC2626), const Color(0xFFF59E0B),
+                        const Color(0xFF3B82F6), const Color(0xFF059669)][i]
+                          : const Color(0xFFE5E7EB),
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                  ),
+                ))),
+                const SizedBox(height: 6),
+                Text(
+                  ['', 'Weak — add uppercase & numbers',
+                    'Fair — add numbers or symbols',
+                    'Good — add a symbol for stronger',
+                    'Strong password ✓'][_strength],
+                  style: TextStyle(fontSize: 11,
+                      color: [Colors.grey, const Color(0xFFDC2626),
+                        const Color(0xFFF59E0B), const Color(0xFF3B82F6),
+                        const Color(0xFF059669)][_strength]),
+                ),
+                const SizedBox(height: 14),
+              ],
+
+              // Validation checklist
+              _CheckRow(label: 'At least $_minLen characters', done: _hasMinLen),
+              const SizedBox(height: 6),
+              _CheckRow(label: 'At least one uppercase letter (A–Z)', done: _hasUpper),
+              const SizedBox(height: 6),
+              _CheckRow(label: 'At least one number (0–9)', done: _hasDigit),
+              const SizedBox(height: 6),
+              _CheckRow(label: 'Symbol like !@#\$ (optional but recommended)',
+                  done: _hasSpecial, optional: true),
+
+              const SizedBox(height: 20),
+
+              SizedBox(
+                width: double.infinity, height: 52,
+                child: ElevatedButton(
+                  onPressed: _newValid ? _advanceToConfirm : null,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF1E40AF),
+                    disabledBackgroundColor: const Color(0xFFE5E7EB),
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16)),
+                  ),
+                  child: Text(
+                    _newValid ? 'Continue →' : 'Meet all requirements to continue',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold,
+                        color: _newValid ? Colors.white : const Color(0xFF9CA3AF)),
+                  ),
+                ),
+              ),
+            ],
+
+            // ── STAGE 2: Confirm password ───────────────────────────────
+            if (_stage == 2) ...[
+              _VerifiedChip(text: 'New password validated ✓'),
+              const SizedBox(height: 16),
+
+              _fieldLabel('Confirm New Password'),
+              const SizedBox(height: 6),
+              TextField(
+                controller: _conCtrl,
+                obscureText: !_showCon,
+                onChanged: (_) => setState(() {}),
+                autofocus: true,
+                style: const TextStyle(fontSize: 14, color: Color(0xFF1F2937)),
+                decoration: InputDecoration(
+                  hintText: '••••••••',
+                  hintStyle: const TextStyle(color: Color(0xFFD1D5DB)),
+                  prefixIcon: Icon(Icons.lock_reset_rounded,
+                      color: _conMismatch
+                          ? const Color(0xFFDC2626)
+                          : _conMatch
+                          ? const Color(0xFF059669)
+                          : const Color(0xFF1E40AF),
+                      size: 18),
+                  suffixIcon: _conCtrl.text.isEmpty
+                      ? IconButton(
+                    icon: Icon(
+                        _showCon
+                            ? Icons.visibility_off_rounded
+                            : Icons.visibility_rounded,
+                        color: const Color(0xFF9CA3AF), size: 18),
+                    onPressed: () => setState(() => _showCon = !_showCon),
+                  )
+                      : Icon(
+                    _conMatch ? Icons.check_circle_rounded : Icons.cancel_rounded,
+                    color: _conMatch
+                        ? const Color(0xFF059669) : const Color(0xFFDC2626),
+                    size: 20,
+                  ),
+                  filled: true,
+                  fillColor: _conMismatch
+                      ? const Color(0xFFFEF2F2)
+                      : _conMatch
+                      ? const Color(0xFFF0FDF4)
+                      : const Color(0xFFF9FAFB),
+                  contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                  enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide(
+                          color: _conMismatch
+                              ? const Color(0xFFDC2626)
+                              : _conMatch
+                              ? const Color(0xFF059669)
+                              : const Color(0xFFE5E7EB))),
+                  focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide(
+                          color: _conMismatch
+                              ? const Color(0xFFDC2626)
+                              : _conMatch
+                              ? const Color(0xFF059669)
+                              : const Color(0xFF1E40AF),
+                          width: 1.5)),
+                ),
+              ),
+
+              const SizedBox(height: 10),
+
+              // Live match feedback
+              if (_conCtrl.text.isNotEmpty)
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 180),
+                  child: _conMatch
+                      ? _inlineMsg(Icons.check_circle_rounded,
+                      'Passwords match!', const Color(0xFF059669),
+                      key: const ValueKey('match'))
+                      : _inlineMsg(Icons.cancel_rounded,
+                      'Passwords do not match yet',
+                      const Color(0xFFDC2626),
+                      key: const ValueKey('mismatch')),
+                ),
+
+              const SizedBox(height: 20),
+
+              Row(children: [
+                // Back to stage 1
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => setState(() {
+                      _stage = 1;
+                      _conCtrl.clear();
+                    }),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Color(0xFFE5E7EB)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14)),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                    child: const Text('← Back',
+                        style: TextStyle(color: Color(0xFF6B7280),
+                            fontWeight: FontWeight.w600)),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  flex: 2,
+                  child: ElevatedButton(
+                    onPressed: (_conMatch && !_submitting) ? _updatePassword : null,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF1E40AF),
+                      disabledBackgroundColor: const Color(0xFFE5E7EB),
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14)),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                    child: _submitting
+                        ? const SizedBox(width: 20, height: 20,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white))
+                        : const Text('Update Password',
+                        style: TextStyle(fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white)),
+                  ),
+                ),
+              ]),
+            ],
+
+            // ── STAGE 3: Success ────────────────────────────────────────
+            if (_stage == 3) ...[
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF0FDF4),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(
+                      color: const Color(0xFF059669).withOpacity(0.20)),
+                ),
+                child: Column(children: [
+                  Container(
+                    width: 64, height: 64,
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                          colors: [Color(0xFF059669), Color(0xFF0D9488)],
+                          begin: Alignment.topLeft, end: Alignment.bottomRight),
+                      shape: BoxShape.circle,
+                      boxShadow: [BoxShadow(
+                          color: const Color(0xFF059669).withOpacity(0.30),
+                          blurRadius: 16, offset: const Offset(0, 4))],
+                    ),
+                    child: const Icon(Icons.check_rounded,
+                        color: Colors.white, size: 34),
+                  ),
+                  const SizedBox(height: 14),
+                  const Text('Password Changed Successfully!',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold,
+                          color: Color(0xFF065F46))),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Your account is now secured with your new password. '
+                        'You may be asked to sign in again on other devices.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 12, color: Color(0xFF374151),
+                        height: 1.5),
+                  ),
+                ]),
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity, height: 52,
+                child: ElevatedButton(
+                  onPressed: () => Navigator.pop(context),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF1F2937),
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16)),
+                  ),
+                  child: const Text('Done',
+                      style: TextStyle(fontSize: 15,
+                          fontWeight: FontWeight.bold, color: Colors.white)),
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
 
-  Widget _pf(String label, TextEditingController c, bool vis, VoidCallback toggle,
-      {bool onChange = false}) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 14),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-            color: Color(0xFF374151))),
-        const SizedBox(height: 6),
-        TextField(
-          controller: c, obscureText: !vis,
-          onChanged: onChange ? (_) => setState(() {}) : null,
-          style: const TextStyle(fontSize: 14, color: Color(0xFF1F2937)),
-          decoration: InputDecoration(
-            hintText: '••••••••', hintStyle: const TextStyle(color: Color(0xFFD1D5DB)),
-            prefixIcon: const Icon(Icons.lock_outline_rounded, color: Color(0xFF1E40AF), size: 18),
-            suffixIcon: IconButton(
-              icon: Icon(vis ? Icons.visibility_off_rounded : Icons.visibility_rounded,
-                  color: const Color(0xFF9CA3AF), size: 18),
-              onPressed: toggle,
-            ),
-            filled: true, fillColor: const Color(0xFFF9FAFB),
-            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14),
-                borderSide: const BorderSide(color: Color(0xFFE5E7EB))),
-            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14),
-                borderSide: const BorderSide(color: Color(0xFF1E40AF), width: 1.5)),
-          ),
-        ),
-      ]),
-    );
-  }
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  Widget _stageLabel(String t, int s) => Text(
+    t,
+    style: TextStyle(
+      fontSize: 9, fontWeight: FontWeight.bold,
+      color: s < _stage
+          ? const Color(0xFF059669)
+          : s == _stage
+          ? const Color(0xFF1E40AF)
+          : const Color(0xFFB0B8CC),
+    ),
+  );
+
+  Widget _fieldLabel(String t) => Text(t,
+      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+          color: Color(0xFF374151)));
+
+  Widget _inlineMsg(IconData icon, String msg, Color c, {Key? key}) =>
+      Row(key: key, children: [
+        Icon(icon, color: c, size: 14),
+        const SizedBox(width: 6),
+        Text(msg, style: TextStyle(fontSize: 12, color: c, fontWeight: FontWeight.w500)),
+      ]);
+}
+
+// ─── Verified chip (green pill shown when a stage passes) ────────────────────
+class _VerifiedChip extends StatelessWidget {
+  final String text;
+  const _VerifiedChip({required this.text});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+    decoration: BoxDecoration(
+      color: const Color(0xFFF0FDF4),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: const Color(0xFF059669).withOpacity(0.25)),
+    ),
+    child: Row(mainAxisSize: MainAxisSize.min, children: [
+      const Icon(Icons.verified_rounded, color: Color(0xFF059669), size: 16),
+      const SizedBox(width: 8),
+      Text(text, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+          color: Color(0xFF065F46))),
+    ]),
+  );
+}
+
+// ─── Validation check row ────────────────────────────────────────────────────
+class _CheckRow extends StatelessWidget {
+  final String label;
+  final bool done;
+  final bool optional;
+  const _CheckRow({required this.label, required this.done, this.optional = false});
+
+  @override
+  Widget build(BuildContext context) => Row(children: [
+    AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      width: 20, height: 20,
+      decoration: BoxDecoration(
+        color: done
+            ? const Color(0xFF059669)
+            : optional
+            ? const Color(0xFFF9FAFB)
+            : const Color(0xFFF3F4F6),
+        shape: BoxShape.circle,
+        border: Border.all(
+            color: done
+                ? const Color(0xFF059669)
+                : optional
+                ? const Color(0xFFD1D5DB)
+                : const Color(0xFFD1D5DB)),
+      ),
+      child: Icon(Icons.check_rounded,
+          size: 12,
+          color: done ? Colors.white : Colors.transparent),
+    ),
+    const SizedBox(width: 10),
+    Text(label,
+        style: TextStyle(
+            fontSize: 12,
+            color: done
+                ? const Color(0xFF059669)
+                : optional
+                ? const Color(0xFFB0B8CC)
+                : const Color(0xFF6B7280),
+            fontWeight: done ? FontWeight.w600 : FontWeight.normal)),
+  ]);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1166,7 +2165,6 @@ class ActivityScreen extends StatelessWidget {
             stream: FirebaseFirestore.instance
                 .collection('bookings')
                 .where('userId', isEqualTo: uid)
-                .orderBy('createdAt', descending: true)
                 .limit(30).snapshots(),
             builder: (ctx, snap) {
               if (snap.connectionState == ConnectionState.waiting) {
@@ -1174,7 +2172,15 @@ class ActivityScreen extends StatelessWidget {
                     child: Center(child: Padding(padding: EdgeInsets.all(40),
                         child: CircularProgressIndicator(color: Color(0xFF0891B2)))));
               }
-              final docs = snap.data?.docs ?? [];
+              final docs = (snap.data?.docs ?? [])
+                ..sort((a, b) {
+                  final aTs = (a.data() as Map<String, dynamic>)['createdAt'] as Timestamp?;
+                  final bTs = (b.data() as Map<String, dynamic>)['createdAt'] as Timestamp?;
+                  if (aTs == null && bTs == null) return 0;
+                  if (aTs == null) return 1;
+                  if (bTs == null) return -1;
+                  return bTs.compareTo(aTs);
+                });
               if (docs.isEmpty) {
                 return const SliverToBoxAdapter(child: _EmptyState(
                     icon: Icons.calendar_today_rounded, color: Color(0xFF0891B2),
@@ -1251,140 +2257,464 @@ class ActivityScreen extends StatelessWidget {
 // ═══════════════════════════════════════════════════════════════════════════
 //  PAYMENTS SCREEN
 // ═══════════════════════════════════════════════════════════════════════════
-class PaymentsScreen extends StatelessWidget {
+// ═══════════════════════════════════════════════════════════════════════════
+//  PAYMENTS SCREEN  — Escrow-aware: shows spending summary + transaction list
+//  No wallet top-up. Cash & UPI payments tracked. UPI goes via escrow.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Maps raw Firestore paymentStatus / paymentMode to UI display values.
+class _PayStatusMeta {
+  final String label;
+  final Color color, bg;
+  final IconData icon;
+  const _PayStatusMeta(this.label, this.color, this.bg, this.icon);
+}
+
+_PayStatusMeta _payMeta(String status, String mode) {
+  switch (status) {
+    case 'in_escrow':
+      return const _PayStatusMeta('In Escrow', Color(0xFF0891B2), Color(0xFFE0F2FE),
+          Icons.lock_clock_rounded);
+    case 'released':
+      return const _PayStatusMeta('Released', Color(0xFF059669), Color(0xFFD1FAE5),
+          Icons.check_circle_rounded);
+    case 'refunded':
+      return const _PayStatusMeta('Refunded', Color(0xFF7C3AED), Color(0xFFEDE9FE),
+          Icons.keyboard_return_rounded);
+    case 'cash_paid':
+      return const _PayStatusMeta('Cash Paid', Color(0xFF059669), Color(0xFFD1FAE5),
+          Icons.payments_rounded);
+    case 'pending':
+      return const _PayStatusMeta('Pending', Color(0xFFD97706), Color(0xFFFEF3C7),
+          Icons.hourglass_empty_rounded);
+    case 'failed':
+      return const _PayStatusMeta('Failed', Color(0xFFDC2626), Color(0xFFFEE2E2),
+          Icons.cancel_rounded);
+    default:
+      return const _PayStatusMeta('Processing', Color(0xFF6B7280), Color(0xFFF3F4F6),
+          Icons.sync_rounded);
+  }
+}
+
+class PaymentsScreen extends StatefulWidget {
   const PaymentsScreen({super.key});
+
+  @override
+  State<PaymentsScreen> createState() => _PaymentsScreenState();
+}
+
+class _PaymentsScreenState extends State<PaymentsScreen>
+    with SingleTickerProviderStateMixin {
+  late final TabController _tab;
+
+  @override
+  void initState() {
+    super.initState();
+    _tab = TabController(length: 2, vsync: this);
+    _tab.addListener(() => setState(() {}));
+  }
+
+  @override
+  void dispose() { _tab.dispose(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+
     return Scaffold(
       backgroundColor: const Color(0xFFF4F6FB),
-      body: CustomScrollView(
-        physics: const ClampingScrollPhysics(),
-        slivers: [
+      body: NestedScrollView(
+        headerSliverBuilder: (_, __) => [
+          // ── Gradient header ─────────────────────────────────────────
           SliverToBoxAdapter(
             child: _SubHeader(
-              title: 'Payments', subtitle: 'Wallet & transaction history',
-              icon: Icons.account_balance_wallet_rounded,
+              title: 'Payments',
+              subtitle: 'Your spending & escrow status',
+              icon: Icons.receipt_long_rounded,
               colors: const [Color(0xFF1E0640), Color(0xFF5B21B6), Color(0xFF7C3AED)],
               onBack: () => Navigator.pop(context),
             ),
           ),
 
-          // Wallet card
+          // ── Spending summary card ───────────────────────────────────
+          SliverToBoxAdapter(
+            child: StreamBuilder<QuerySnapshot>(
+              stream: FirebaseFirestore.instance
+                  .collection('transactions')
+                  .where('userId', isEqualTo: uid)
+                  .snapshots(),
+              builder: (_, snap) {
+                final docs  = snap.data?.docs ?? [];
+                double total = 0, escrow = 0, cash = 0;
+                for (final d in docs) {
+                  final tx     = d.data() as Map<String, dynamic>;
+                  final amt    = (tx['amount'] as num?)?.toDouble() ?? 0;
+                  final mode   = tx['paymentMode']   as String? ?? '';
+                  final status = tx['paymentStatus'] as String? ?? '';
+                  total += amt;
+                  if (mode == 'cash') cash += amt;
+                  if (status == 'in_escrow') escrow += amt;
+                }
+                return _SpendingSummaryCard(total: total, escrow: escrow, cash: cash);
+              },
+            ),
+          ),
+
+          // ── Escrow explainer banner ─────────────────────────────────
+          const SliverToBoxAdapter(child: _EscrowInfoBanner()),
+
+          // ── Tab bar ─────────────────────────────────────────────────
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
-              child: StreamBuilder<DocumentSnapshot>(
-                stream: FirebaseFirestore.instance.collection('users').doc(uid).snapshots(),
-                builder: (_, snap) {
-                  final d = snap.data?.data() as Map<String, dynamic>? ?? {};
-                  final bal = (d['walletBalance'] as num?)?.toDouble() ?? 0.0;
-                  return Container(
-                    padding: const EdgeInsets.all(22),
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                          colors: [Color(0xFF3B1F8C), Color(0xFF5B21B6), Color(0xFF7C3AED)],
-                          begin: Alignment.topLeft, end: Alignment.bottomRight),
-                      borderRadius: BorderRadius.circular(22),
-                      boxShadow: [BoxShadow(color: const Color(0xFF5B21B6).withOpacity(0.35),
-                          blurRadius: 18, offset: const Offset(0, 6))],
-                    ),
-                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Row(children: [
-                        Container(width: 38, height: 38,
-                            decoration: BoxDecoration(color: Colors.white.withOpacity(0.18),
-                                shape: BoxShape.circle),
-                            child: const Icon(Icons.account_balance_wallet_rounded,
-                                color: Colors.white, size: 20)),
-                        const SizedBox(width: 10),
-                        const Text('Sarthi Wallet', style: TextStyle(fontSize: 14,
-                            color: Colors.white70)),
-                      ]),
-                      const SizedBox(height: 16),
-                      Text('₹${bal.toStringAsFixed(2)}',
-                          style: const TextStyle(fontSize: 32,
-                              fontWeight: FontWeight.bold, color: Colors.white)),
-                      Text('Available Balance',
-                          style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.65))),
-                      const SizedBox(height: 16),
-                      Row(children: [
-                        _WA(Icons.add_rounded, 'Add Money', () {}),
-                        const SizedBox(width: 10),
-                        _WA(Icons.history_rounded, 'History', () {}),
-                        const SizedBox(width: 10),
-                        _WA(Icons.send_rounded, 'Transfer', () {}),
-                      ]),
-                    ]),
-                  );
-                },
+              child: Container(
+                height: 44,
+                decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(14),
+                    boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05),
+                        blurRadius: 8, offset: const Offset(0, 2))]),
+                child: TabBar(
+                  controller: _tab,
+                  labelColor: Colors.white,
+                  unselectedLabelColor: const Color(0xFF6B7280),
+                  labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                  indicator: BoxDecoration(
+                    gradient: const LinearGradient(
+                        colors: [Color(0xFF5B21B6), Color(0xFF7C3AED)],
+                        begin: Alignment.topLeft, end: Alignment.bottomRight),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  indicatorSize: TabBarIndicatorSize.tab,
+                  dividerColor: Colors.transparent,
+                  tabs: const [Tab(text: 'All Payments'), Tab(text: 'In Escrow')],
+                ),
               ),
             ),
           ),
 
-          // Transactions
-          StreamBuilder<QuerySnapshot>(
-            stream: FirebaseFirestore.instance
-                .collection('transactions')
-                .where('userId', isEqualTo: uid)
-                .orderBy('createdAt', descending: true)
-                .limit(20).snapshots(),
-            builder: (_, snap) {
-              final docs = snap.data?.docs ?? [];
-              if (docs.isEmpty) {
-                return const SliverToBoxAdapter(child: _EmptyState(
-                    icon: Icons.receipt_long_rounded, color: Color(0xFF7C3AED),
-                    bg: Color(0xFFEDE9FE),
-                    title: 'No transactions yet',
-                    sub: 'Your payment history will\nappear here.'));
-              }
-              return SliverPadding(
-                padding: const EdgeInsets.fromLTRB(20, 20, 20, 100),
-                sliver: SliverList(
-                  delegate: SliverChildBuilderDelegate(
-                        (_, i) {
-                      final d = docs[i].data() as Map<String, dynamic>;
-                      final type   = d['type']        as String? ?? 'debit';
-                      final amount = (d['amount']     as num?)?.toDouble() ?? 0.0;
-                      final desc   = d['description'] as String? ?? 'Transaction';
-                      final ts     = d['createdAt']   as Timestamp?;
-                      final isC    = type == 'credit' || type == 'refund';
-                      return Container(
-                        margin: const EdgeInsets.only(bottom: 10),
-                        padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(color: Colors.white,
-                            borderRadius: BorderRadius.circular(16),
-                            boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04),
-                                blurRadius: 8, offset: const Offset(0, 2))]),
-                        child: Row(children: [
-                          Container(width: 42, height: 42,
-                              decoration: BoxDecoration(
-                                  color: isC ? const Color(0xFFD1FAE5) : const Color(0xFFFEE2E2),
-                                  borderRadius: BorderRadius.circular(12)),
-                              child: Icon(
-                                isC ? Icons.arrow_downward_rounded : Icons.arrow_upward_rounded,
-                                color: isC ? const Color(0xFF059669) : const Color(0xFFDC2626),
-                                size: 20,
-                              )),
-                          const SizedBox(width: 12),
-                          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            Text(desc, style: const TextStyle(fontSize: 13,
-                                fontWeight: FontWeight.w600, color: Color(0xFF1F2937))),
-                            if (ts != null) Text(_ft(ts.toDate()),
-                                style: const TextStyle(fontSize: 11, color: Color(0xFFB0B8CC))),
-                          ])),
-                          Text('${isC ? '+' : '-'}₹${amount.toStringAsFixed(2)}',
-                              style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold,
-                                  color: isC ? const Color(0xFF059669) : const Color(0xFFDC2626))),
-                        ]),
-                      );
-                    },
-                    childCount: docs.length,
-                  ),
-                ),
-              );
-            },
+          const SliverToBoxAdapter(child: SizedBox(height: 16)),
+        ],
+
+        body: TabBarView(
+          controller: _tab,
+          children: [
+            // ── Tab 0: All transactions ─────────────────────────────
+            _TransactionsList(uid: uid, escrowOnly: false),
+            // ── Tab 1: Escrow-only ──────────────────────────────────
+            _TransactionsList(uid: uid, escrowOnly: true),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Spending summary card ────────────────────────────────────────────────────
+class _SpendingSummaryCard extends StatelessWidget {
+  final double total, escrow, cash;
+  const _SpendingSummaryCard({required this.total, required this.escrow, required this.cash});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+            colors: [Color(0xFF3B1F8C), Color(0xFF5B21B6), Color(0xFF7C3AED)],
+            begin: Alignment.topLeft, end: Alignment.bottomRight),
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: [BoxShadow(color: const Color(0xFF5B21B6).withOpacity(0.30),
+            blurRadius: 18, offset: const Offset(0, 6))],
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        // Header row
+        Row(children: [
+          Container(width: 36, height: 36,
+              decoration: BoxDecoration(color: Colors.white.withOpacity(0.18),
+                  shape: BoxShape.circle),
+              child: const Icon(Icons.receipt_long_rounded, color: Colors.white, size: 18)),
+          const SizedBox(width: 10),
+          const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Total Spent on Trouble Sarthi',
+                style: TextStyle(fontSize: 12, color: Colors.white70)),
+          ]),
+        ]),
+
+        const SizedBox(height: 14),
+
+        Text('₹${total.toStringAsFixed(2)}',
+            style: const TextStyle(fontSize: 34, fontWeight: FontWeight.bold, color: Colors.white)),
+
+        const SizedBox(height: 16),
+
+        // 2 stat pills
+        Row(children: [
+          _StatPill(
+            icon: Icons.lock_clock_rounded,
+            label: 'In Escrow',
+            value: '₹${escrow.toStringAsFixed(0)}',
+            color: const Color(0xFF22D3EE),
           ),
+          const SizedBox(width: 10),
+          _StatPill(
+            icon: Icons.payments_rounded,
+            label: 'Paid Cash',
+            value: '₹${cash.toStringAsFixed(0)}',
+            color: const Color(0xFF86EFAC),
+          ),
+          const SizedBox(width: 10),
+          _StatPill(
+            icon: Icons.check_circle_rounded,
+            label: 'Released',
+            value: '₹${(total - escrow - cash).clamp(0, double.infinity).toStringAsFixed(0)}',
+            color: const Color(0xFFA78BFA),
+          ),
+        ]),
+      ]),
+    );
+  }
+}
+
+class _StatPill extends StatelessWidget {
+  final IconData icon;
+  final String label, value;
+  final Color color;
+  const _StatPill({required this.icon, required this.label,
+    required this.value, required this.color});
+
+  @override
+  Widget build(BuildContext context) => Expanded(
+    child: Container(
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 10),
+      decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.14),
+          borderRadius: BorderRadius.circular(14)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Icon(icon, color: color, size: 16),
+        const SizedBox(height: 6),
+        Text(value, style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: color)),
+        Text(label, style: TextStyle(fontSize: 9, color: Colors.white.withOpacity(0.70))),
+      ]),
+    ),
+  );
+}
+
+// ─── Escrow explainer banner ──────────────────────────────────────────────────
+class _EscrowInfoBanner extends StatelessWidget {
+  const _EscrowInfoBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(20, 14, 20, 0),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFE0F2FE),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF0891B2).withOpacity(0.20)),
+      ),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Container(
+          width: 34, height: 34,
+          decoration: BoxDecoration(
+              color: const Color(0xFF0891B2).withOpacity(0.15),
+              shape: BoxShape.circle),
+          child: const Icon(Icons.security_rounded, color: Color(0xFF0891B2), size: 18),
+        ),
+        const SizedBox(width: 12),
+        const Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('🔐  How UPI Payments Work',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold,
+                    color: Color(0xFF0C4A6E))),
+            SizedBox(height: 4),
+            Text(
+              'When you pay via UPI, the money is held securely in escrow — '
+                  'not released to the helper until you confirm the service is done. '
+                  'Cash payments are recorded directly.',
+              style: TextStyle(fontSize: 11, color: Color(0xFF0C4A6E), height: 1.5),
+            ),
+          ]),
+        ),
+      ]),
+    );
+  }
+}
+
+// ─── Transaction list (used in both tabs) ────────────────────────────────────
+class _TransactionsList extends StatelessWidget {
+  final String uid;
+  final bool escrowOnly;
+  const _TransactionsList({required this.uid, required this.escrowOnly});
+
+  @override
+  Widget build(BuildContext context) {
+    // Fetch all user transactions, filter + sort client-side to avoid composite index requirement
+    final Stream<QuerySnapshot> stream = FirebaseFirestore.instance
+        .collection('transactions')
+        .where('userId', isEqualTo: uid)
+        .limit(escrowOnly ? 30 : 40)
+        .snapshots();
+
+    return StreamBuilder<QuerySnapshot>(
+      stream: stream,
+      builder: (_, snap) {
+        if (snap.connectionState == ConnectionState.waiting) {
+          return const Center(child: Padding(
+              padding: EdgeInsets.all(40),
+              child: CircularProgressIndicator(color: Color(0xFF7C3AED))));
+        }
+
+        // Client-side filter (escrow) + sort by createdAt desc — avoids composite index
+        final rawDocs = snap.data?.docs ?? [];
+        final docs = rawDocs
+            .where((d) {
+          if (!escrowOnly) return true;
+          final tx = d.data() as Map<String, dynamic>;
+          return tx['paymentStatus'] == 'in_escrow';
+        })
+            .toList()
+          ..sort((a, b) {
+            final aTs = (a.data() as Map<String, dynamic>)['createdAt'] as Timestamp?;
+            final bTs = (b.data() as Map<String, dynamic>)['createdAt'] as Timestamp?;
+            if (aTs == null && bTs == null) return 0;
+            if (aTs == null) return 1;
+            if (bTs == null) return -1;
+            return bTs.compareTo(aTs);
+          });
+
+        if (docs.isEmpty) {
+          return _EmptyState(
+            icon: escrowOnly ? Icons.lock_clock_rounded : Icons.receipt_long_rounded,
+            color: const Color(0xFF7C3AED),
+            bg: const Color(0xFFEDE9FE),
+            title: escrowOnly ? 'No funds in escrow' : 'No payments yet',
+            sub: escrowOnly
+                ? 'UPI payments held in escrow\nwill appear here.'
+                : 'Your cash & UPI payment history\nwill appear here.',
+          );
+        }
+
+        return ListView.builder(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 100),
+          itemCount: docs.length,
+          itemBuilder: (_, i) {
+            final tx = docs[i].data() as Map<String, dynamic>;
+            return _TransactionCard(data: tx);
+          },
+        );
+      },
+    );
+  }
+}
+
+// ─── Single transaction card ──────────────────────────────────────────────────
+class _TransactionCard extends StatelessWidget {
+  final Map<String, dynamic> data;
+  const _TransactionCard({required this.data});
+
+  @override
+  Widget build(BuildContext context) {
+    final amount      = (data['amount']        as num?)?.toDouble() ?? 0.0;
+    final mode        = data['paymentMode']    as String? ?? 'upi';
+    final status      = data['paymentStatus']  as String? ?? 'pending';
+    final service     = data['serviceName']    as String? ?? 'Service';
+    final helper      = data['helperName']     as String? ?? 'Helper';
+    final bookingId   = data['bookingId']      as String? ?? '';
+    final ts          = data['createdAt']      as Timestamp?;
+    final meta        = _payMeta(status, mode);
+    final isCash      = mode == 'cash';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04),
+            blurRadius: 10, offset: const Offset(0, 3))],
+      ),
+      child: Column(
+        children: [
+          // ── Main row ──────────────────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              // Mode icon
+              Container(
+                width: 46, height: 46,
+                decoration: BoxDecoration(
+                    color: isCash ? const Color(0xFFD1FAE5) : const Color(0xFFEDE9FE),
+                    borderRadius: BorderRadius.circular(13)),
+                child: Icon(
+                  isCash ? Icons.payments_rounded : Icons.phone_android_rounded,
+                  color: isCash ? const Color(0xFF059669) : const Color(0xFF7C3AED),
+                  size: 22,
+                ),
+              ),
+              const SizedBox(width: 12),
+
+              // Details
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(service, style: const TextStyle(fontSize: 14,
+                    fontWeight: FontWeight.bold, color: Color(0xFF1F2937))),
+                const SizedBox(height: 3),
+                Text('Helper: $helper',
+                    style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+                const SizedBox(height: 3),
+                Row(children: [
+                  // Payment mode chip
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: isCash
+                          ? const Color(0xFFD1FAE5) : const Color(0xFFEDE9FE),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      isCash ? '💵 Cash' : '📱 UPI',
+                      style: TextStyle(
+                          fontSize: 10, fontWeight: FontWeight.bold,
+                          color: isCash ? const Color(0xFF059669) : const Color(0xFF7C3AED)),
+                    ),
+                  ),
+                  if (ts != null) ...[
+                    const SizedBox(width: 8),
+                    Text(_ft(ts.toDate()),
+                        style: const TextStyle(fontSize: 10, color: Color(0xFFB0B8CC))),
+                  ],
+                ]),
+              ])),
+
+              // Amount + status
+              Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                Text('₹${amount.toStringAsFixed(0)}',
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold,
+                        color: Color(0xFF1F2937))),
+                const SizedBox(height: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                  decoration: BoxDecoration(
+                      color: meta.bg,
+                      borderRadius: BorderRadius.circular(10)),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(meta.icon, size: 11, color: meta.color),
+                    const SizedBox(width: 4),
+                    Text(meta.label,
+                        style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold,
+                            color: meta.color)),
+                  ]),
+                ),
+              ]),
+            ]),
+          ),
+
+          // ── Escrow progress bar (UPI only, not released/refunded) ──
+          if (!isCash && status == 'in_escrow') ...[
+            const Divider(height: 1, color: Color(0xFFF3F4F6)),
+            _EscrowProgressRow(bookingId: bookingId),
+          ],
         ],
       ),
     );
@@ -1396,28 +2726,89 @@ class PaymentsScreen extends StatelessWidget {
   }
 }
 
-class _WA extends StatelessWidget {
-  final IconData icon; final String label; final VoidCallback onTap;
-  const _WA(this.icon, this.label, this.onTap);
+// ─── Escrow progress row (reads booking doc for live status) ─────────────────
+class _EscrowProgressRow extends StatelessWidget {
+  final String bookingId;
+  const _EscrowProgressRow({required this.bookingId});
+
+  @override
+  Widget build(BuildContext context) {
+    if (bookingId.isEmpty) return const SizedBox.shrink();
+
+    return StreamBuilder<DocumentSnapshot>(
+      stream: FirebaseFirestore.instance
+          .collection('bookings').doc(bookingId).snapshots(),
+      builder: (_, snap) {
+        final d = snap.data?.data() as Map<String, dynamic>? ?? {};
+        final svcStatus    = d['serviceStatus']   as String? ?? 'pending';
+        final proofUploaded = (d['proofUploaded'] as bool?) ?? false;
+        final userConfirmed = (d['userConfirmed'] as bool?) ?? false;
+
+        // 3 steps: service done → proof uploaded → funds released
+        final step1 = svcStatus == 'completed' || svcStatus == 'confirmed';
+        final step2 = proofUploaded;
+        final step3 = userConfirmed;
+
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('ESCROW RELEASE PROGRESS',
+                style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold,
+                    color: Color(0xFF9CA3AF), letterSpacing: 1.2)),
+            const SizedBox(height: 10),
+            Row(children: [
+              _EStep(done: step1, label: 'Service\nCompleted',  icon: Icons.handyman_rounded),
+              _ELine(done: step1 && step2),
+              _EStep(done: step2, label: 'Proof\nUploaded',    icon: Icons.upload_file_rounded),
+              _ELine(done: step2 && step3),
+              _EStep(done: step3, label: 'Funds\nReleased',    icon: Icons.check_circle_rounded),
+            ]),
+          ]),
+        );
+      },
+    );
+  }
+}
+
+class _EStep extends StatelessWidget {
+  final bool done;
+  final String label;
+  final IconData icon;
+  const _EStep({required this.done, required this.label, required this.icon});
+
+  @override
+  Widget build(BuildContext context) => Column(children: [
+    Container(
+      width: 32, height: 32,
+      decoration: BoxDecoration(
+        color: done ? const Color(0xFF059669) : const Color(0xFFF3F4F6),
+        shape: BoxShape.circle,
+      ),
+      child: Icon(icon, size: 16,
+          color: done ? Colors.white : const Color(0xFFD1D5DB)),
+    ),
+    const SizedBox(height: 5),
+    Text(label, textAlign: TextAlign.center,
+        style: TextStyle(fontSize: 9, height: 1.3,
+            color: done ? const Color(0xFF059669) : const Color(0xFFB0B8CC),
+            fontWeight: done ? FontWeight.bold : FontWeight.normal)),
+  ]);
+}
+
+class _ELine extends StatelessWidget {
+  final bool done;
+  const _ELine({required this.done});
 
   @override
   Widget build(BuildContext context) => Expanded(
-    child: GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        decoration: BoxDecoration(color: Colors.white.withOpacity(0.15),
-            borderRadius: BorderRadius.circular(12)),
-        child: Column(children: [
-          Icon(icon, color: Colors.white, size: 20),
-          const SizedBox(height: 4),
-          Text(label, style: const TextStyle(fontSize: 11, color: Colors.white)),
-        ]),
-      ),
+    child: Container(
+      height: 2, margin: const EdgeInsets.only(bottom: 20),
+      color: done ? const Color(0xFF059669) : const Color(0xFFE5E7EB),
     ),
   );
 }
 
+// ─── Shared empty state ───────────────────────────────────────────────────────
 class _EmptyState extends StatelessWidget {
   final IconData icon; final Color color, bg;
   final String title, sub;
@@ -1769,5 +3160,8 @@ class _TapCard extends StatelessWidget {
             Text(trailing, style: const TextStyle(fontSize: 13, color: Color(0xFF9CA3AF))),
             const SizedBox(width: 4),
             const Icon(Icons.chevron_right_rounded, color: Color(0xFFD1D5DB), size: 20),
-          ])));
+          ]
+          )
+      )
+  );
 }

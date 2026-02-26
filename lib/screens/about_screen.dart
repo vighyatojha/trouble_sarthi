@@ -39,7 +39,7 @@ class _AboutScreenState extends State<AboutScreen>
     )..forward();
 
     // Lightweight opacity-only stagger — avoids SlideTransition jank on scroll
-    _fades = List.generate(6, (i) {
+    _fades = List.generate(7, (i) {
       final start = (i * 0.12).clamp(0.0, 0.8);
       final end = (start + 0.35).clamp(0.0, 1.0);
       return Tween<double>(begin: 0, end: 1).animate(
@@ -126,6 +126,31 @@ class _AboutScreenState extends State<AboutScreen>
                     animation: _fades[5],
                     child: const _LearnMoreButton(),
                   ),
+
+                  // ── Demo Banner ──────────────────────────────────
+                  _FadeIn(
+                    animation: _fades[6],
+                    child: _DemoBanner(
+                      onDemoAsUser: () => MutualReviewSheet.showForUser(
+                        context,
+                        bookingId: 'DEMO-001',
+                        helperId: 'helper_demo',
+                        helperName: 'Rajesh Kumar',
+                        serviceName: 'Emergency Plumbing',
+                        demoMode: true,
+                      ),
+                      onDemoAsHelper: () => MutualReviewSheet.showForHelper(
+                        context,
+                        bookingId: 'DEMO-001',
+                        userId: 'user_demo',
+                        userName: 'Arjun Mehta',
+                        serviceName: 'Emergency Plumbing',
+                        demoMode: true,
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 24),
 
                   const SizedBox(height: 32),
                   // Privacy note
@@ -584,7 +609,6 @@ class _HelperRatingsFeed extends StatelessWidget {
       stream: FirebaseFirestore.instance
           .collectionGroup('helper_to_user')
           .where('revieweeId', isEqualTo: uid)
-          .orderBy('createdAt', descending: true)
           .limit(10)
           .snapshots(),
       builder: (context, snap) {
@@ -592,7 +616,15 @@ class _HelperRatingsFeed extends StatelessWidget {
           return const _SimpleShimmer(height: 90, count: 2);
         }
 
-        final docs = snap.data?.docs ?? [];
+        final docs = (snap.data?.docs ?? [])
+          ..sort((a, b) {
+            final aTs = (a.data() as Map<String, dynamic>)['createdAt'] as Timestamp?;
+            final bTs = (b.data() as Map<String, dynamic>)['createdAt'] as Timestamp?;
+            if (aTs == null && bTs == null) return 0;
+            if (aTs == null) return 1;
+            if (bTs == null) return -1;
+            return bTs.compareTo(aTs);
+          });
         if (docs.isEmpty) return const _EmptyRatings();
 
         return Column(
@@ -846,7 +878,6 @@ class _ReportHistorySection extends StatelessWidget {
       stream: FirebaseFirestore.instance
           .collection('reports')
           .where('reporterId', isEqualTo: uid)
-          .orderBy('createdAt', descending: true)
           .limit(5)
           .snapshots(),
       builder: (context, snap) {
@@ -854,7 +885,15 @@ class _ReportHistorySection extends StatelessWidget {
           return const _SimpleShimmer(height: 70, count: 2);
         }
 
-        final docs = snap.data?.docs ?? [];
+        final docs = (snap.data?.docs ?? [])
+          ..sort((a, b) {
+            final aTs = (a.data() as Map<String, dynamic>)['createdAt'] as Timestamp?;
+            final bTs = (b.data() as Map<String, dynamic>)['createdAt'] as Timestamp?;
+            if (aTs == null && bTs == null) return 0;
+            if (aTs == null) return 1;
+            if (bTs == null) return -1;
+            return bTs.compareTo(aTs);
+          });
 
         if (docs.isEmpty) {
           return Container(
@@ -998,6 +1037,271 @@ class _StatusBadge extends StatelessWidget {
           letterSpacing: 0.4,
           height: 1.3,
         ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DEMO BANNER  — shows two buttons to trigger MutualReviewSheet in demo mode
+// Remove this widget (and its _FadeIn above) before production release.
+// ─────────────────────────────────────────────────────────────────────────────
+class _DemoBanner extends StatelessWidget {
+  final VoidCallback onDemoAsUser;
+  final VoidCallback onDemoAsHelper;
+  const _DemoBanner({required this.onDemoAsUser, required this.onDemoAsHelper});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: const Color(0xFFE9D8FD), width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF7C3AED).withOpacity(0.08),
+            blurRadius: 16,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── Header ────────────────────────────────────────────────
+          Container(
+            padding: const EdgeInsets.fromLTRB(18, 14, 18, 14),
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                colors: [Color(0xFF3B1F8C), Color(0xFF5B21B6), Color(0xFF7C3AED)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.only(
+                topLeft: Radius.circular(20),
+                topRight: Radius.circular(20),
+              ),
+            ),
+            child: Row(children: [
+              Container(
+                width: 36, height: 36,
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.18),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(Icons.play_circle_rounded,
+                    color: Colors.white, size: 20),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('🎯  Try the Mutual Review Feature',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold,
+                          color: Colors.white)),
+                  SizedBox(height: 2),
+                  Text('Pre-filled demo — tap to experience the full flow',
+                      style: TextStyle(fontSize: 11, color: Colors.white70)),
+                ]),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.22),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Text('DEMO',
+                    style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold,
+                        color: Colors.white, letterSpacing: 1)),
+              ),
+            ]),
+          ),
+
+          // ── Description ───────────────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 16, 18, 4),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('After every booking, both parties review each other.',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                      color: Color(0xFF1F2937))),
+              const SizedBox(height: 6),
+              const Text(
+                'This builds a trust ecosystem — helpers rate users, users rate helpers. '
+                    'Bad actors get flagged automatically. Tap a role below to see the full sheet.',
+                style: TextStyle(fontSize: 12, color: Color(0xFF6B7280), height: 1.5),
+              ),
+              const SizedBox(height: 14),
+
+              // ── Flow steps ─────────────────────────────────────
+              _FlowStep(
+                number: '1',
+                color: const Color(0xFF7C3AED),
+                title: 'Questionnaire',
+                sub: '6 quick questions about the experience',
+              ),
+              _FlowStep(
+                number: '2',
+                color: const Color(0xFF0891B2),
+                title: 'Star Rating',
+                sub: 'Overall 1–5 star rating for the person',
+              ),
+              _FlowStep(
+                number: '3',
+                color: const Color(0xFF059669),
+                title: 'Submit & Update',
+                sub: 'Score saved, avg rating recalculated live',
+                isLast: true,
+              ),
+            ]),
+          ),
+
+          // ── Divider ───────────────────────────────────────────────
+          const Divider(height: 1, color: Color(0xFFF0EBF9), indent: 18, endIndent: 18),
+
+          // ── Two buttons ───────────────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+            child: Column(children: [
+              const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                Icon(Icons.info_outline_rounded, size: 12, color: Color(0xFF9CA3AF)),
+                SizedBox(width: 5),
+                Text('All answers are pre-filled — just tap through',
+                    style: TextStyle(fontSize: 10, color: Color(0xFF9CA3AF))),
+              ]),
+              const SizedBox(height: 10),
+              Row(children: [
+                // User → rates Helper
+                Expanded(
+                  child: _DemoButton(
+                    icon: Icons.person_rounded,
+                    label: 'As User',
+                    sub: 'Rating a Helper',
+                    color: const Color(0xFF7C3AED),
+                    bgColor: const Color(0xFFEDE9FE),
+                    onTap: onDemoAsUser,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                // Helper → rates User
+                Expanded(
+                  child: _DemoButton(
+                    icon: Icons.engineering_rounded,
+                    label: 'As Helper',
+                    sub: 'Rating a Customer',
+                    color: const Color(0xFF0D9488),
+                    bgColor: const Color(0xFFCCFBF1),
+                    onTap: onDemoAsHelper,
+                  ),
+                ),
+              ]),
+            ]),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FlowStep extends StatelessWidget {
+  final String number, title, sub;
+  final Color color;
+  final bool isLast;
+  const _FlowStep({
+    required this.number, required this.title,
+    required this.sub, required this.color, this.isLast = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Column(children: [
+          Container(
+            width: 24, height: 24,
+            decoration: BoxDecoration(color: color.withOpacity(0.12),
+                shape: BoxShape.circle),
+            child: Center(child: Text(number,
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: color))),
+          ),
+          if (!isLast)
+            Container(width: 1.5, height: 16,
+                color: color.withOpacity(0.20),
+                margin: const EdgeInsets.symmetric(vertical: 2)),
+        ]),
+        const SizedBox(width: 10),
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title, style: const TextStyle(fontSize: 12,
+                fontWeight: FontWeight.bold, color: Color(0xFF1F2937))),
+            Text(sub, style: const TextStyle(fontSize: 11, color: Color(0xFF6B7280))),
+          ]),
+        ),
+      ]),
+    );
+  }
+}
+
+class _DemoButton extends StatefulWidget {
+  final IconData icon;
+  final String label, sub;
+  final Color color, bgColor;
+  final VoidCallback onTap;
+  const _DemoButton({required this.icon, required this.label, required this.sub,
+    required this.color, required this.bgColor, required this.onTap});
+
+  @override
+  State<_DemoButton> createState() => _DemoButtonState();
+}
+
+class _DemoButtonState extends State<_DemoButton> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) { setState(() => _pressed = false); widget.onTap(); },
+      onTapCancel: () => setState(() => _pressed = false),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        transform: Matrix4.identity()..scale(_pressed ? 0.96 : 1.0),
+        transformAlignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
+        decoration: BoxDecoration(
+          color: widget.bgColor,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: widget.color.withOpacity(0.25)),
+          boxShadow: _pressed ? null : [
+            BoxShadow(color: widget.color.withOpacity(0.12),
+                blurRadius: 8, offset: const Offset(0, 3)),
+          ],
+        ),
+        child: Column(children: [
+          Container(
+            width: 40, height: 40,
+            decoration: BoxDecoration(color: widget.color, shape: BoxShape.circle),
+            child: Icon(widget.icon, color: Colors.white, size: 20),
+          ),
+          const SizedBox(height: 8),
+          Text(widget.label, style: TextStyle(fontSize: 13,
+              fontWeight: FontWeight.bold, color: widget.color)),
+          const SizedBox(height: 2),
+          Text(widget.sub, textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 10, color: Color(0xFF6B7280))),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: widget.color,
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: const Text('Launch Demo →',
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold,
+                    color: Colors.white)),
+          ),
+        ]),
       ),
     );
   }

@@ -12,7 +12,14 @@
     <uses-permission android:name="android.permission.VIBRATE"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.CALL_PHONE"/>
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32"/>
     <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
+
+    <!-- ── ADDED: Required for Firebase Phone Auth OTP ──────────────────── -->
+    <uses-permission android:name="android.permission.RECEIVE_SMS"/>
+    <uses-permission android:name="android.permission.READ_SMS"/>
 
     <application
         android:label="Trouble Sarthi"
@@ -24,16 +31,14 @@
         <!-- ── Google Maps API Key ───────────────────────────────────────── -->
         <meta-data
             android:name="com.google.android.geo.API_KEY"
-            android:value="AIzaSyDTCkM4Wf2IxwwJ07LE85cTlyEPTLmqcDk"/>
+            android:value="YOUR_GOOGLE_MAPS_API_KEY"/>
 
         <!-- ── Facebook App ID ───────────────────────────────────────────── -->
-        <!-- REPLACE YOUR_FACEBOOK_APP_ID with your actual Facebook App ID   -->
         <meta-data
             android:name="com.facebook.sdk.ApplicationId"
             android:value="@string/facebook_app_id"/>
 
         <!-- ── Facebook Client Token ─────────────────────────────────────── -->
-        <!-- REPLACE YOUR_FACEBOOK_CLIENT_TOKEN with your actual token        -->
         <meta-data
             android:name="com.facebook.sdk.ClientToken"
             android:value="@string/facebook_client_token"/>
@@ -69,6 +74,16 @@
 
         </activity>
 
+        <!-- ── ADDED: Firebase Messaging Service ────────────────────────── -->
+        <!-- This enables silent push verification → removes reCAPTCHA      -->
+        <service
+            android:name="com.google.firebase.messaging.FirebaseMessagingService"
+            android:exported="false">
+            <intent-filter android:priority="-500">
+                <action android:name="com.google.firebase.MESSAGING_EVENT"/>
+            </intent-filter>
+        </service>
+
         <!-- ── Facebook Login Activity ───────────────────────────────────── -->
         <activity
             android:name="com.facebook.FacebookActivity"
@@ -83,7 +98,6 @@
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
-                <!-- REPLACE YOUR_FACEBOOK_APP_ID with your actual Facebook App ID -->
                 <data android:scheme="fbYOUR_FACEBOOK_APP_ID"/>
             </intent-filter>
         </activity>
@@ -101,21 +115,21 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
-        <!-- For phone calls -->
+
         <intent>
             <action android:name="android.intent.action.DIAL"/>
         </intent>
-        <!-- For maps -->
+
         <intent>
             <action android:name="android.intent.action.VIEW"/>
             <data android:scheme="geo"/>
         </intent>
-        <!-- For browser / Google Sign-In Chrome Custom Tabs -->
+
         <intent>
             <action android:name="android.intent.action.VIEW"/>
             <data android:scheme="https"/>
         </intent>
-        <!-- For Facebook Login -->
+
         <intent>
             <action android:name="android.intent.action.VIEW"/>
             <data android:scheme="fb"/>
