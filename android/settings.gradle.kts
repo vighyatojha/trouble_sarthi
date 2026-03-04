@@ -19,11 +19,14 @@ pluginManagement {
 plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
 
-    // IMPORTANT: ANDROID PLUGIN MUST HAVE VERSION HERE
-    id("com.android.application") version "8.7.3" apply false
+    // ✅ Updated Android Gradle Plugin
+    id("com.android.application") version "8.9.1" apply false
+
+    // ✅ Stable Kotlin version
     id("org.jetbrains.kotlin.android") version "2.1.0" apply false
 
-    id("com.google.gms.google-services") version "4.3.15" apply false
+    // ✅ Updated Google services
+    id("com.google.gms.google-services") version "4.4.2" apply false
 }
 
 include(":app")

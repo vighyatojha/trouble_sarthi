@@ -6,32 +6,34 @@
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
-    <uses-permission android:name="android.permission.CALL_PHONE"/>
+    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
+    <uses-permission android:name="android.permission.USE_FINGERPRINT"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
+    <!-- Foreground service type permission (required for Android 14+) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING"/>
+
+    <!-- REMOVED CALL_PHONE — use ACTION_DIAL intent instead (user confirms the call) -->
+
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32"/>
-    <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
-
-    <!-- ── ADDED: Required for Firebase Phone Auth OTP ──────────────────── -->
-    <uses-permission android:name="android.permission.RECEIVE_SMS"/>
-    <uses-permission android:name="android.permission.READ_SMS"/>
 
     <application
         android:label="Trouble Sarthi"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
-        android:usesCleartextTraffic="true"
-        android:hardwareAccelerated="true">
+        android:hardwareAccelerated="true"
+        android:allowBackup="true"
+        android:fullBackupOnly="true">
 
         <!-- ── Google Maps API Key ───────────────────────────────────────── -->
         <meta-data
             android:name="com.google.android.geo.API_KEY"
-            android:value="YOUR_GOOGLE_MAPS_API_KEY"/>
+            android:value="AIzaSyAF7fsleQw4FmiBLZQ6JhlQ2lnuQQJnrjk"/>
 
         <!-- ── Facebook App ID ───────────────────────────────────────────── -->
         <meta-data
@@ -74,8 +76,7 @@
 
         </activity>
 
-        <!-- ── ADDED: Firebase Messaging Service ────────────────────────── -->
-        <!-- This enables silent push verification → removes reCAPTCHA      -->
+        <!-- ── Firebase Messaging Service ────────────────────────────────── -->
         <service
             android:name="com.google.firebase.messaging.FirebaseMessagingService"
             android:exported="false">
@@ -83,6 +84,15 @@
                 <action android:name="com.google.firebase.MESSAGING_EVENT"/>
             </intent-filter>
         </service>
+
+        <!-- ── Notification Foreground Service ───────────────────────────── -->
+        <!-- Declared so Play Protect understands FOREGROUND_SERVICE + WAKE_LOCK -->
+        <!-- are used for delivering notifications, not background surveillance  -->
+        <service
+            android:name=".NotificationForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging"
+            android:stopWithTask="false"/>
 
         <!-- ── Facebook Login Activity ───────────────────────────────────── -->
         <activity
@@ -98,7 +108,7 @@
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="fbYOUR_FACEBOOK_APP_ID"/>
+                <data android:scheme="@string/fb_login_protocol_scheme"/>
             </intent-filter>
         </activity>
 
@@ -115,21 +125,23 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
-
-        <intent>
-            <action android:name="android.intent.action.DIAL"/>
-        </intent>
-
-        <intent>
-            <action android:name="android.intent.action.VIEW"/>
-            <data android:scheme="geo"/>
-        </intent>
-
+        <package android:name="com.whatsapp" />
+        <package android:name="com.whatsapp.w4b" />
         <intent>
             <action android:name="android.intent.action.VIEW"/>
             <data android:scheme="https"/>
         </intent>
-
+        <intent>
+            <action android:name="android.intent.action.DIAL"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SENDTO"/>
+            <data android:scheme="mailto"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="geo"/>
+        </intent>
         <intent>
             <action android:name="android.intent.action.VIEW"/>
             <data android:scheme="fb"/>

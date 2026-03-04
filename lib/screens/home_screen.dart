@@ -8,9 +8,28 @@ import 'package:trouble_sarthi/screens/profile_screen.dart';
 import 'auth/login_screen.dart';
 import 'messages_screen.dart' show NotificationCountNotifier, ServicesScreen;
 import 'about_screen.dart';
-import 'booking_screen.dart';           // ← your new bookings screen
+import 'booking_screen.dart';
 import 'location_picker_screen.dart';
 import 'helper_list_screen.dart';
+import 'midnight_emergency_screen.dart';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COLOR HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+Color _darken(Color c, [double amount = 0.18]) {
+  final hsl = HSLColor.fromColor(c);
+  return hsl
+      .withLightness((hsl.lightness - amount).clamp(0.0, 1.0))
+      .toColor();
+}
+
+Color _lighten(Color c, [double amount = 0.18]) {
+  final hsl = HSLColor.fromColor(c);
+  return hsl
+      .withLightness((hsl.lightness + amount).clamp(0.0, 1.0))
+      .toColor();
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DATA MODELS
@@ -28,20 +47,29 @@ class _Category {
   final Color color;
   final Color bgColor;
   final List<_SubService> subs;
+  final String tagline;
+
   const _Category({
     required this.title,
     required this.categoryIcon,
     required this.color,
     required this.bgColor,
     required this.subs,
+    required this.tagline,
   });
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CATEGORIES DATA
+// ─────────────────────────────────────────────────────────────────────────────
 
 const _kCategories = <_Category>[
   _Category(
     title: 'Home Services',
+    tagline: 'Plumber · AC · Electric',
     categoryIcon: Icons.home_repair_service_rounded,
-    color: Color(0xFF7C3AED), bgColor: Color(0xFFEDE9FE),
+    color: Color(0xFF7C3AED),
+    bgColor: Color(0xFFEDE9FE),
     subs: [
       _SubService('Plumber', Icons.water_drop_outlined),
       _SubService('Electrician', Icons.bolt_outlined),
@@ -55,8 +83,10 @@ const _kCategories = <_Category>[
   ),
   _Category(
     title: 'Vehicle Services',
+    tagline: 'Car · Bike · Towing',
     categoryIcon: Icons.directions_car_rounded,
-    color: Color(0xFF0284C7), bgColor: Color(0xFFE0F2FE),
+    color: Color(0xFF0284C7),
+    bgColor: Color(0xFFE0F2FE),
     subs: [
       _SubService('Car Mechanic', Icons.car_repair),
       _SubService('Bike Mechanic', Icons.two_wheeler),
@@ -68,20 +98,25 @@ const _kCategories = <_Category>[
   ),
   _Category(
     title: 'Emergency',
+    tagline: 'Ambulance · First Aid · 24×7',
     categoryIcon: Icons.local_hospital_rounded,
-    color: Color(0xFFDC2626), bgColor: Color(0xFFFEE2E2),
+    color: Color(0xFFDC2626),
+    bgColor: Color(0xFFFEE2E2),
     subs: [
       _SubService('Ambulance', Icons.local_hospital_outlined),
       _SubService('First Aid', Icons.medical_services_outlined),
       _SubService('Blood Donor', Icons.bloodtype_outlined),
       _SubService('Fire Help', Icons.local_fire_department_outlined),
       _SubService('Disaster Support', Icons.warning_amber_outlined),
+      _SubService('Mid-Night Vehicle Emergency', Icons.nights_stay_rounded),
     ],
   ),
   _Category(
     title: 'Delivery & Pickup',
+    tagline: 'Parcels · Grocery · Meds',
     categoryIcon: Icons.local_shipping_rounded,
-    color: Color(0xFFD97706), bgColor: Color(0xFFFEF3C7),
+    color: Color(0xFFD97706),
+    bgColor: Color(0xFFFEF3C7),
     subs: [
       _SubService('Parcel Pickup', Icons.local_post_office_outlined),
       _SubService('Grocery Delivery', Icons.shopping_basket_outlined),
@@ -92,8 +127,10 @@ const _kCategories = <_Category>[
   ),
   _Category(
     title: 'Technical Services',
+    tagline: 'Mobile · Laptop · WiFi',
     categoryIcon: Icons.build_rounded,
-    color: Color(0xFF0891B2), bgColor: Color(0xFFCFFAFE),
+    color: Color(0xFF0891B2),
+    bgColor: Color(0xFFCFFAFE),
     subs: [
       _SubService('Mobile Repair', Icons.phone_android_outlined),
       _SubService('Laptop Repair', Icons.laptop_outlined),
@@ -104,8 +141,10 @@ const _kCategories = <_Category>[
   ),
   _Category(
     title: 'Personal Assistance',
+    tagline: 'Tutor · Trainer · Care',
     categoryIcon: Icons.school_rounded,
-    color: Color(0xFF059669), bgColor: Color(0xFFD1FAE5),
+    color: Color(0xFF059669),
+    bgColor: Color(0xFFD1FAE5),
     subs: [
       _SubService('Home Tutor', Icons.school_outlined),
       _SubService('Fitness Trainer', Icons.fitness_center_outlined),
@@ -116,8 +155,10 @@ const _kCategories = <_Category>[
   ),
   _Category(
     title: 'Events & Occasions',
+    tagline: 'Photo · DJ · Decor',
     categoryIcon: Icons.celebration_rounded,
-    color: Color(0xFFDB2777), bgColor: Color(0xFFFCE7F3),
+    color: Color(0xFFDB2777),
+    bgColor: Color(0xFFFCE7F3),
     subs: [
       _SubService('Photographer', Icons.camera_alt_outlined),
       _SubService('Videographer', Icons.videocam_outlined),
@@ -128,8 +169,10 @@ const _kCategories = <_Category>[
   ),
   _Category(
     title: 'Construction',
+    tagline: 'Mason · Interior · Tiles',
     categoryIcon: Icons.foundation_rounded,
-    color: Color(0xFF92400E), bgColor: Color(0xFFFDE68A),
+    color: Color(0xFF92400E),
+    bgColor: Color(0xFFFDE68A),
     subs: [
       _SubService('Mason', Icons.foundation_outlined),
       _SubService('Interior Design', Icons.design_services_outlined),
@@ -140,8 +183,10 @@ const _kCategories = <_Category>[
   ),
   _Category(
     title: 'Cleaning',
+    tagline: 'Deep · Pest · Tank',
     categoryIcon: Icons.cleaning_services_rounded,
-    color: Color(0xFF0D9488), bgColor: Color(0xFFCCFBF1),
+    color: Color(0xFF0D9488),
+    bgColor: Color(0xFFCCFBF1),
     subs: [
       _SubService('Deep Cleaning', Icons.clean_hands_outlined),
       _SubService('Bathroom Clean', Icons.bathroom_outlined),
@@ -152,8 +197,10 @@ const _kCategories = <_Category>[
   ),
   _Category(
     title: 'Professional',
+    tagline: 'Legal · CA · Insurance',
     categoryIcon: Icons.gavel_rounded,
-    color: Color(0xFF4338CA), bgColor: Color(0xFFE0E7FF),
+    color: Color(0xFF4338CA),
+    bgColor: Color(0xFFE0E7FF),
     subs: [
       _SubService('Lawyer Consult', Icons.gavel_outlined),
       _SubService('CA / Tax Help', Icons.calculate_outlined),
@@ -163,8 +210,10 @@ const _kCategories = <_Category>[
   ),
   _Category(
     title: 'Outdoor & More',
+    tagline: 'Garden · Guard · Driver',
     categoryIcon: Icons.park_rounded,
-    color: Color(0xFF16A34A), bgColor: Color(0xFFDCFCE7),
+    color: Color(0xFF16A34A),
+    bgColor: Color(0xFFDCFCE7),
     subs: [
       _SubService('Gardener', Icons.yard_outlined),
       _SubService('Security Guard', Icons.security_outlined),
@@ -174,8 +223,10 @@ const _kCategories = <_Category>[
   ),
   _Category(
     title: 'Community Help',
+    tagline: 'Volunteer · NGO · Senior',
     categoryIcon: Icons.volunteer_activism_rounded,
-    color: Color(0xFF7C3AED), bgColor: Color(0xFFF3E8FF),
+    color: Color(0xFF7C3AED),
+    bgColor: Color(0xFFF3E8FF),
     subs: [
       _SubService('Volunteer Help', Icons.volunteer_activism_outlined),
       _SubService('Senior Support', Icons.elderly_outlined),
@@ -199,13 +250,12 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int _selectedIndex = 0;
 
-  // ⚠️ NOT const — BookingsScreen uses TickerProviderStateMixin (not const-safe)
   final List<Widget> _screens = [
-    const HomeContent(),   // 0 — Home
-    const ServicesScreen(), // 1 — Messages
-    const BookingsScreen(), // 2 — Bookings  ← gradient calendar button
-    const AboutScreen(),    // 3 — Trust/About
-    const ProfileScreen() // 4 — Profile
+    const HomeContent(),
+    const ServicesScreen(),
+    const BookingsScreen(),
+    const AboutScreen(),
+    const ProfileScreen(),
   ];
 
   void _onNavTap(int i) {
@@ -231,7 +281,7 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PROFILE PLACEHOLDER  (replace with your real ProfileScreen)
+// PROFILE PLACEHOLDER
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _ProfilePlaceholder extends StatelessWidget {
@@ -294,7 +344,6 @@ class _FloatingBottomNav extends StatelessWidget {
             borderRadius: BorderRadius.circular(34),
             child: Row(
               children: [
-                // 0 — Home
                 _NavItem(
                   icon: Icons.home_outlined,
                   activeIcon: Icons.home_rounded,
@@ -303,11 +352,9 @@ class _FloatingBottomNav extends StatelessWidget {
                   sel: selectedIndex,
                   onTap: onTap,
                 ),
-                // 1 — Messages (with unread dot badge)
                 _MessageNavItem(sel: selectedIndex, onTap: onTap),
-                // 2 — Bookings (gradient circle, centre hero)
-                _BookingNavItem(idx: 2, sel: selectedIndex, onTap: onTap),
-                // 3 — Trust / About
+                _BookingNavItem(
+                    idx: 2, sel: selectedIndex, onTap: onTap),
                 _NavItem(
                   icon: Icons.verified_user_outlined,
                   activeIcon: Icons.verified_user_rounded,
@@ -316,7 +363,6 @@ class _FloatingBottomNav extends StatelessWidget {
                   sel: selectedIndex,
                   onTap: onTap,
                 ),
-                // 4 — Profile
                 _NavItem(
                   icon: Icons.person_outline_rounded,
                   activeIcon: Icons.person_rounded,
@@ -368,11 +414,12 @@ class _NavItem extends StatelessWidget {
             AnimatedContainer(
               duration: const Duration(milliseconds: 200),
               curve: Curves.easeOutCubic,
-              padding:
-              const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 12, vertical: 4),
               decoration: BoxDecoration(
-                color:
-                active ? const Color(0xFFEDE9FE) : Colors.transparent,
+                color: active
+                    ? const Color(0xFFEDE9FE)
+                    : Colors.transparent,
                 borderRadius: BorderRadius.circular(20),
               ),
               child: Icon(
@@ -399,7 +446,6 @@ class _NavItem extends StatelessWidget {
   }
 }
 
-/// Messages nav item with live unread notification dot badge
 class _MessageNavItem extends StatelessWidget {
   final int sel;
   final ValueChanged<int> onTap;
@@ -477,7 +523,6 @@ class _MessageNavItem extends StatelessWidget {
   }
 }
 
-/// Centre "Bookings" — aesthetic multi-color gradient circle
 class _BookingNavItem extends StatelessWidget {
   final int idx, sel;
   final ValueChanged<int> onTap;
@@ -505,7 +550,7 @@ class _BookingNavItem extends StatelessWidget {
                   colors: [
                     Color(0xFF7C3AED),
                     Color(0xFFEC4899),
-                    Color(0xFFF59E0B)
+                    Color(0xFFF59E0B),
                   ],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
@@ -514,7 +559,7 @@ class _BookingNavItem extends StatelessWidget {
                   colors: [
                     Color(0xFFB8A4E8),
                     Color(0xFFF0ABCB),
-                    Color(0xFFFCD5A0)
+                    Color(0xFFFCD5A0),
                   ],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
@@ -523,14 +568,14 @@ class _BookingNavItem extends StatelessWidget {
                 boxShadow: active
                     ? [
                   BoxShadow(
-                    color:
-                    const Color(0xFF7C3AED).withOpacity(0.40),
+                    color: const Color(0xFF7C3AED)
+                        .withOpacity(0.40),
                     blurRadius: 12,
                     offset: const Offset(0, 3),
                   ),
                   BoxShadow(
-                    color:
-                    const Color(0xFFEC4899).withOpacity(0.20),
+                    color: const Color(0xFFEC4899)
+                        .withOpacity(0.20),
                     blurRadius: 8,
                     offset: const Offset(0, 2),
                   ),
@@ -648,11 +693,12 @@ class _HomeContentState extends State<HomeContent>
           final curved = CurvedAnimation(
               parent: animation, curve: Curves.easeOutCubic);
           return FadeTransition(
-            opacity:
-            Tween<double>(begin: 0.0, end: 1.0).animate(curved),
+            opacity: Tween<double>(begin: 0.0, end: 1.0)
+                .animate(curved),
             child: SlideTransition(
               position: Tween<Offset>(
-                  begin: const Offset(0, 0.06), end: Offset.zero)
+                  begin: const Offset(0, 0.06),
+                  end: Offset.zero)
                   .animate(curved),
               child: child,
             ),
@@ -718,7 +764,7 @@ class _HomeContentState extends State<HomeContent>
           ),
         ),
         SliverPadding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 130),
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
           sliver: SliverGrid(
             gridDelegate:
             const SliverGridDelegateWithFixedCrossAxisCount(
@@ -738,6 +784,12 @@ class _HomeContentState extends State<HomeContent>
             ),
           ),
         ),
+        // ── NEW: How It Works ──────────────────────────────────────────────
+        const SliverToBoxAdapter(child: _HowItWorksSection()),
+        // ── NEW: App Footer ────────────────────────────────────────────────
+        const SliverToBoxAdapter(child: _AppFooter()),
+        // Bottom padding so content clears the floating nav bar
+        const SliverToBoxAdapter(child: SizedBox(height: 75)),
       ],
     );
   }
@@ -760,7 +812,7 @@ class _Header extends StatelessWidget {
           colors: [
             Color(0xFF1E0640),
             Color(0xFF3B0764),
-            Color(0xFF5B21B6)
+            Color(0xFF5B21B6),
           ],
         ),
       ),
@@ -924,7 +976,8 @@ class _AuthHeaderContent extends StatelessWidget {
                       child: Text(location,
                           style: TextStyle(
                               fontSize: 11,
-                              color: Colors.white.withOpacity(0.85),
+                              color:
+                              Colors.white.withOpacity(0.85),
                               fontWeight: FontWeight.w500),
                           overflow: TextOverflow.ellipsis),
                     ),
@@ -950,7 +1003,7 @@ class _GradientAppName extends StatelessWidget {
     colors: [
       Color(0xFFEDE9FE),
       Color(0xFFC4B5FD),
-      Color(0xFFA78BFA)
+      Color(0xFFA78BFA),
     ],
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,
@@ -1024,7 +1077,8 @@ class _ProfileAvatar extends StatelessWidget {
               decoration: BoxDecoration(
                 color: const Color(0xFF22C55E),
                 shape: BoxShape.circle,
-                border: Border.all(color: Colors.white, width: 1.5),
+                border:
+                Border.all(color: Colors.white, width: 1.5),
               ),
             ),
           ),
@@ -1081,7 +1135,8 @@ class _ProfileAvatar extends StatelessWidget {
                         pageBuilder: (_, __, ___) =>
                         const LoginScreen(),
                         transitionsBuilder: (_, a, __, child) =>
-                            FadeTransition(opacity: a, child: child),
+                            FadeTransition(
+                                opacity: a, child: child),
                         transitionDuration:
                         const Duration(milliseconds: 250),
                       ),
@@ -1189,7 +1244,6 @@ class _SosBannerState extends State<_SosBanner>
       builder: (_, child) => GestureDetector(
         onTap: widget.onTap,
         child: Container(
-          height: 108,
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(22),
             gradient: const LinearGradient(
@@ -1241,13 +1295,15 @@ class _SosBannerState extends State<_SosBanner>
           ),
           Padding(
             padding: const EdgeInsets.symmetric(
-                horizontal: 18, vertical: 14),
+                horizontal: 18, vertical: 16),
             child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisAlignment: MainAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
                     children: [
                       Container(
                         padding: const EdgeInsets.symmetric(
@@ -1292,8 +1348,25 @@ class _SosBannerState extends State<_SosBanner>
                         'Professional help in under 15 min',
                         style: TextStyle(
                             fontSize: 11,
-                            color:
-                            Colors.white.withOpacity(0.60)),
+                            color: Colors.white.withOpacity(0.60)),
+                      ),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Icon(Icons.check_circle_rounded,
+                              size: 10,
+                              color: const Color(0xFF14FFEC)
+                                  .withOpacity(0.85)),
+                          const SizedBox(width: 4),
+                          Text(
+                            'All services available 24×7 for everyone',
+                            style: TextStyle(
+                                fontSize: 10,
+                                color: const Color(0xFF14FFEC)
+                                    .withOpacity(0.85),
+                                fontWeight: FontWeight.w600),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -1304,10 +1377,7 @@ class _SosBannerState extends State<_SosBanner>
                       horizontal: 14, vertical: 12),
                   decoration: BoxDecoration(
                     gradient: const LinearGradient(
-                      colors: [
-                        Color(0xFF0D7377),
-                        Color(0xFF14FFEC)
-                      ],
+                      colors: [Color(0xFF0D7377), Color(0xFF14FFEC)],
                       begin: Alignment.topLeft,
                       end: Alignment.bottomRight,
                     ),
@@ -1358,39 +1428,37 @@ class _FeatureBanners extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-      child: IntrinsicHeight(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(
-                child: _FeatureCard(
-                  gradient: const LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [Color(0xFF4338CA), Color(0xFF7C3AED)],
-                  ),
-                  shadowColor: const Color(0xFF4338CA),
-                  icon: Icons.chat_bubble_outline_rounded,
-                  bgIcon: Icons.chat_bubble_rounded,
-                  title: 'Live Chat',
-                  subtitle: 'User ↔ Helper, real-time',
-                )),
-            const SizedBox(width: 12),
-            Expanded(
-                child: _FeatureCard(
-                  gradient: const LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [Color(0xFF0891B2), Color(0xFF059669)],
-                  ),
-                  shadowColor: const Color(0xFF0891B2),
-                  icon: Icons.location_on_rounded,
-                  bgIcon: Icons.bolt_rounded,
-                  title: 'Local & Fast',
-                  subtitle: 'Near you, always quick',
-                )),
-          ],
-        ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+              child: _FeatureCard(
+                gradient: const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [Color(0xFF4338CA), Color(0xFF7C3AED)],
+                ),
+                shadowColor: const Color(0xFF4338CA),
+                icon: Icons.chat_bubble_outline_rounded,
+                bgIcon: Icons.chat_bubble_rounded,
+                title: 'Live Chat',
+                subtitle: 'User ↔ Helper, real-time',
+              )),
+          const SizedBox(width: 12),
+          Expanded(
+              child: _FeatureCard(
+                gradient: const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [Color(0xFF0891B2), Color(0xFF059669)],
+                ),
+                shadowColor: const Color(0xFF0891B2),
+                icon: Icons.location_on_rounded,
+                bgIcon: Icons.bolt_rounded,
+                title: 'Local & Fast',
+                subtitle: 'Near you, always quick',
+              )),
+        ],
       ),
     );
   }
@@ -1413,57 +1481,59 @@ class _FeatureCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      constraints: const BoxConstraints(minHeight: 96),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(18),
-        gradient: gradient,
-        boxShadow: [
-          BoxShadow(
-            color: shadowColor.withOpacity(0.22),
-            blurRadius: 14,
-            offset: const Offset(0, 5),
-          ),
-        ],
-      ),
-      child: Stack(
-        children: [
-          Positioned(
-            right: -6,
-            bottom: -8,
-            child: Icon(bgIcon,
-                size: 50,
-                color: Colors.white.withOpacity(0.10)),
-          ),
-          Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(6),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.18),
-                  borderRadius: BorderRadius.circular(8),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(18),
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(18),
+          gradient: gradient,
+          boxShadow: [
+            BoxShadow(
+              color: shadowColor.withOpacity(0.22),
+              blurRadius: 14,
+              offset: const Offset(0, 5),
+            ),
+          ],
+        ),
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Positioned(
+              right: -6,
+              bottom: -8,
+              child: Icon(bgIcon,
+                  size: 50, color: Colors.white.withOpacity(0.10)),
+            ),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.18),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Icon(icon, color: Colors.white, size: 16),
                 ),
-                child: Icon(icon, color: Colors.white, size: 16),
-              ),
-              const SizedBox(height: 10),
-              Text(title,
-                  style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white)),
-              const SizedBox(height: 2),
-              Text(subtitle,
-                  style: TextStyle(
-                      fontSize: 10,
-                      color: Colors.white.withOpacity(0.72)),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis),
-            ],
-          ),
-        ],
+                const SizedBox(height: 10),
+                Text(title,
+                    style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white)),
+                const SizedBox(height: 2),
+                Text(subtitle,
+                    style: TextStyle(
+                        fontSize: 10,
+                        color: Colors.white.withOpacity(0.72)),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1519,7 +1589,8 @@ class _StatChip extends StatelessWidget {
   Widget build(BuildContext context) {
     return Expanded(
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 10),
+        padding: const EdgeInsets.symmetric(
+            vertical: 10, horizontal: 10),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(14),
@@ -1583,6 +1654,9 @@ class _CategoryCardState extends State<_CategoryCard> {
   @override
   Widget build(BuildContext context) {
     final cat = widget.cat;
+    final gradientStart = _lighten(cat.color, 0.06);
+    final gradientEnd = _darken(cat.color, 0.12);
+
     return GestureDetector(
       onTapDown: (_) => setState(() => _pressed = true),
       onTapUp: (_) {
@@ -1591,120 +1665,483 @@ class _CategoryCardState extends State<_CategoryCard> {
       },
       onTapCancel: () => setState(() => _pressed = false),
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 110),
+        duration: const Duration(milliseconds: 130),
         curve: Curves.easeOutCubic,
-        transform: Matrix4.identity()..scale(_pressed ? 0.96 : 1.0),
+        transform: Matrix4.identity()
+          ..scale(_pressed ? 0.955 : 1.0),
         transformAlignment: Alignment.center,
         decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(24),
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [
-              cat.bgColor,
-              Color.lerp(cat.bgColor, Colors.white, 0.55)!,
-              Colors.white,
-            ],
-            stops: const [0.0, 0.5, 1.0],
+            colors: [gradientStart, gradientEnd],
           ),
-          borderRadius: BorderRadius.circular(24),
           boxShadow: [
             BoxShadow(
-              color: cat.color
-                  .withOpacity(_pressed ? 0.14 : 0.09),
-              blurRadius: _pressed ? 5 : 14,
-              offset: const Offset(0, 5),
+              color:
+              cat.color.withOpacity(_pressed ? 0.20 : 0.32),
+              blurRadius: _pressed ? 6 : 20,
+              spreadRadius: -3,
+              offset: const Offset(0, 7),
             ),
           ],
         ),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 14, 12, 12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(24),
+          child: Stack(
             children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(14),
-                      boxShadow: [
-                        BoxShadow(
-                          color: cat.color.withOpacity(0.14),
-                          blurRadius: 8,
-                          offset: const Offset(0, 3),
-                        ),
-                      ],
-                    ),
-                    child: Icon(cat.categoryIcon,
-                        color: cat.color, size: 22),
+              Positioned(
+                right: -18,
+                top: -18,
+                child: Container(
+                  width: 76,
+                  height: 76,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.white.withOpacity(0.10),
                   ),
-                  const Spacer(),
-                  Container(
-                    width: 28,
-                    height: 28,
-                    decoration: BoxDecoration(
-                      color: cat.color,
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(
-                        Icons.chevron_right_rounded,
-                        color: Colors.white,
-                        size: 18),
-                  ),
-                ],
-              ),
-              const Spacer(),
-              Text(
-                cat.title,
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.bold,
-                  color: cat.color,
-                  height: 1.2,
                 ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
               ),
-              const SizedBox(height: 4),
-              Row(
-                children: [
-                  Flexible(
-                    child: Text(
-                      '${cat.subs.length} services',
+              Positioned(
+                left: -10,
+                bottom: -20,
+                child: Container(
+                  width: 50,
+                  height: 50,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.white.withOpacity(0.06),
+                  ),
+                ),
+              ),
+              Positioned(
+                right: -8,
+                bottom: -8,
+                child: Icon(
+                  cat.categoryIcon,
+                  size: 80,
+                  color: Colors.white.withOpacity(0.10),
+                ),
+              ),
+              Padding(
+                padding:
+                const EdgeInsets.fromLTRB(14, 14, 12, 13),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.20),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: Colors.white.withOpacity(0.25),
+                          width: 1,
+                        ),
+                      ),
+                      child: Icon(cat.categoryIcon,
+                          color: Colors.white, size: 20),
+                    ),
+                    const Spacer(),
+                    Text(
+                      cat.title,
                       style: const TextStyle(
-                          fontSize: 10,
-                          color: Color(0xFF9CA3AF)),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.white,
+                        height: 1.2,
+                        letterSpacing: 0.1,
+                      ),
+                      maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 5),
-                    child: Text('·',
-                        style: TextStyle(
-                            fontSize: 10,
-                            color: const Color(0xFF9CA3AF)
-                                .withOpacity(0.6))),
-                  ),
-                  Flexible(
-                    child: Text(
-                      'Tap to view',
-                      style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w600,
-                          color: cat.color.withOpacity(0.7)),
-                      overflow: TextOverflow.ellipsis,
+                    const SizedBox(height: 5),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 9, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.22),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                            color: Colors.white.withOpacity(0.30),
+                            width: 0.8),
+                      ),
+                      child: Text(
+                        '${cat.subs.length} services',
+                        style: const TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                          letterSpacing: 0.2,
+                        ),
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ],
           ),
         ),
       ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HOW IT WORKS SECTION  ← NEW
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _HowItWorksSection extends StatelessWidget {
+  const _HowItWorksSection();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Text(
+                'How It Works',
+                style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF1F2937)),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 9, vertical: 3),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFEDE9FE),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: const Text(
+                  '3 easy steps',
+                  style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF7C3AED)),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Container(
+            padding: const EdgeInsets.fromLTRB(18, 20, 18, 20),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(24),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF7C3AED).withOpacity(0.07),
+                  blurRadius: 20,
+                  offset: const Offset(0, 6),
+                ),
+              ],
+            ),
+            child: const Column(
+              children: [
+                _StepTile(
+                  icon: Icons.search_rounded,
+                  color: Color(0xFF7C3AED),
+                  bgColor: Color(0xFFEDE9FE),
+                  title: 'Search a Service',
+                  desc: 'Pick from 12 categories or search directly by name.',
+                  isLast: false,
+                ),
+                _StepTile(
+                  icon: Icons.person_pin_circle_rounded,
+                  color: Color(0xFF0891B2),
+                  bgColor: Color(0xFFCFFAFE),
+                  title: 'Choose a Helper',
+                  desc: 'Browse verified, rated helpers available near you.',
+                  isLast: false,
+                ),
+                _StepTile(
+                  icon: Icons.check_circle_rounded,
+                  color: Color(0xFF059669),
+                  bgColor: Color(0xFFD1FAE5),
+                  title: 'Get It Done',
+                  desc: 'Book instantly, chat live, and rate your experience.',
+                  isLast: true,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StepTile extends StatelessWidget {
+  final String title, desc;
+  final IconData icon;
+  final Color color, bgColor;
+  final bool isLast;
+
+  const _StepTile({
+    required this.icon,
+    required this.color,
+    required this.bgColor,
+    required this.title,
+    required this.desc,
+    required this.isLast,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Column(
+          children: [
+            Container(
+              width: 46,
+              height: 46,
+              decoration: BoxDecoration(
+                color: bgColor,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(icon, color: color, size: 21),
+            ),
+            if (!isLast)
+              Container(
+                width: 2,
+                height: 30,
+                margin: const EdgeInsets.symmetric(vertical: 4),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(2),
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      color.withOpacity(0.35),
+                      color.withOpacity(0.08),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(width: 16),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.only(top: 11),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title,
+                    style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: color)),
+                const SizedBox(height: 3),
+                Text(desc,
+                    style: const TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF6B7280),
+                        height: 1.45)),
+                if (!isLast) const SizedBox(height: 16),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// APP FOOTER  ← NEW
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _AppFooter extends StatelessWidget {
+  const _AppFooter();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+      padding: const EdgeInsets.all(22),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(28),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color(0xFF1E0640),
+            Color(0xFF3B0764),
+            Color(0xFF5B21B6),
+          ],
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF7C3AED).withOpacity(0.28),
+            blurRadius: 28,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Stack(
+        children: [
+          // Decorative circles
+          Positioned(
+            right: -22,
+            top: -22,
+            child: Container(
+              width: 96,
+              height: 96,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.white.withOpacity(0.05),
+              ),
+            ),
+          ),
+          Positioned(
+            left: -12,
+            bottom: -26,
+            child: Container(
+              width: 68,
+              height: 68,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.white.withOpacity(0.04),
+              ),
+            ),
+          ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Brand row
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.14),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                          color: Colors.white.withOpacity(0.22)),
+                    ),
+                    child: const Icon(
+                        Icons.volunteer_activism_rounded,
+                        color: Colors.white,
+                        size: 22),
+                  ),
+                  const SizedBox(width: 14),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const _GradientAppName(fontSize: 19),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Your neighbourhood helper',
+                        style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.white.withOpacity(0.52)),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
+              // Thin divider
+              Container(
+                height: 1,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [
+                      Colors.white.withOpacity(0.0),
+                      Colors.white.withOpacity(0.15),
+                      Colors.white.withOpacity(0.0),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 18),
+              // Trust badges
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: const [
+                  _FooterBadge(
+                      icon: Icons.verified_rounded,
+                      label: 'Verified\nHelpers'),
+                  _FooterBadge(
+                      icon: Icons.lock_outline_rounded,
+                      label: 'Secure\nPayments'),
+                  _FooterBadge(
+                      icon: Icons.support_agent_rounded,
+                      label: '24/7\nSupport'),
+                  _FooterBadge(
+                      icon: Icons.star_rate_rounded,
+                      label: 'Rated\n4.8★'),
+                ],
+              ),
+              const SizedBox(height: 18),
+              // Bottom copyright strip
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 11),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                      color: Colors.white.withOpacity(0.11)),
+                ),
+                child: Text(
+                  '© 2025 Trouble Sarthi  ·  Made with ❤️ in Surat',
+                  style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.white.withOpacity(0.50),
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: 0.2),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FooterBadge extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  const _FooterBadge({required this.icon, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.10),
+            shape: BoxShape.circle,
+            border:
+            Border.all(color: Colors.white.withOpacity(0.18)),
+          ),
+          child: Icon(icon, color: const Color(0xFFC4B5FD), size: 18),
+        ),
+        const SizedBox(height: 7),
+        Text(
+          label,
+          style: TextStyle(
+              fontSize: 9.5,
+              color: Colors.white.withOpacity(0.62),
+              fontWeight: FontWeight.w600,
+              height: 1.45),
+          textAlign: TextAlign.center,
+        ),
+      ],
     );
   }
 }
@@ -1780,7 +2217,7 @@ class _SearchScreenState extends State<SearchScreen> {
                 colors: [
                   Color(0xFF1E0640),
                   Color(0xFF3B0764),
-                  Color(0xFF5B21B6)
+                  Color(0xFF5B21B6),
                 ],
               ),
             ),
@@ -1880,14 +2317,15 @@ class _SearchScreenState extends State<SearchScreen> {
             child: _results.isEmpty
                 ? _EmptySearch(query: _query)
                 : ListView.builder(
-              padding:
-              const EdgeInsets.fromLTRB(16, 4, 16, 100),
+              padding: const EdgeInsets.fromLTRB(
+                  16, 4, 16, 100),
               physics: const ClampingScrollPhysics(),
               itemCount: _results.length,
               itemBuilder: (_, i) {
                 final cat = _results[i];
                 return Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
+                  padding:
+                  const EdgeInsets.only(bottom: 10),
                   child: RepaintBoundary(
                     child: _SearchResultCard(
                       cat: cat,
@@ -1910,7 +2348,9 @@ class _SearchResultCard extends StatefulWidget {
   final String query;
   final VoidCallback onTap;
   const _SearchResultCard(
-      {required this.cat, required this.query, required this.onTap});
+      {required this.cat,
+        required this.query,
+        required this.onTap});
 
   @override
   State<_SearchResultCard> createState() =>
@@ -1952,8 +2392,8 @@ class _SearchResultCardState extends State<_SearchResultCard> {
           borderRadius: BorderRadius.circular(22),
           boxShadow: [
             BoxShadow(
-              color: cat.color
-                  .withOpacity(_pressed ? 0.12 : 0.06),
+              color:
+              cat.color.withOpacity(_pressed ? 0.12 : 0.06),
               blurRadius: _pressed ? 4 : 10,
               offset: const Offset(0, 3),
             ),
@@ -1974,8 +2414,7 @@ class _SearchResultCardState extends State<_SearchResultCard> {
                       borderRadius: BorderRadius.circular(14),
                       boxShadow: [
                         BoxShadow(
-                            color:
-                            cat.color.withOpacity(0.12),
+                            color: cat.color.withOpacity(0.12),
                             blurRadius: 6,
                             offset: const Offset(0, 2))
                       ],
@@ -2007,8 +2446,7 @@ class _SearchResultCardState extends State<_SearchResultCard> {
                     width: 28,
                     height: 28,
                     decoration: BoxDecoration(
-                        color: cat.color,
-                        shape: BoxShape.circle),
+                        color: cat.color, shape: BoxShape.circle),
                     child: const Icon(
                         Icons.chevron_right_rounded,
                         color: Colors.white,
@@ -2039,8 +2477,7 @@ class _SearchResultCardState extends State<_SearchResultCard> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(s.icon,
-                            size: 12,
-                            color: cat.color),
+                            size: 12, color: cat.color),
                         const SizedBox(width: 4),
                         Text(s.name,
                             style: TextStyle(
@@ -2141,10 +2578,7 @@ class _LocationAlertDialog extends StatelessWidget {
               height: 82,
               decoration: const BoxDecoration(
                 gradient: LinearGradient(
-                  colors: [
-                    Color(0xFF6D28D9),
-                    Color(0xFF9D5CF6)
-                  ],
+                  colors: [Color(0xFF6D28D9), Color(0xFF9D5CF6)],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                 ),
@@ -2190,8 +2624,7 @@ class _LocationAlertDialog extends StatelessWidget {
                   SizedBox(height: 10),
                   _Perk(
                       icon: Icons.timelapse_rounded,
-                      text:
-                      'Get accurate arrival time estimates'),
+                      text: 'Get accurate arrival time estimates'),
                   SizedBox(height: 10),
                   _Perk(
                       icon: Icons.local_offer_outlined,
@@ -2216,8 +2649,7 @@ class _LocationAlertDialog extends StatelessWidget {
                   backgroundColor: const Color(0xFF7C3AED),
                   elevation: 0,
                   shape: RoundedRectangleBorder(
-                      borderRadius:
-                      BorderRadius.circular(26)),
+                      borderRadius: BorderRadius.circular(26)),
                 ),
               ),
             ),
@@ -2253,8 +2685,8 @@ class _Perk extends StatelessWidget {
           decoration: BoxDecoration(
               color: const Color(0xFFEDE9FE),
               borderRadius: BorderRadius.circular(8)),
-          child: Icon(icon,
-              size: 16, color: const Color(0xFF7C3AED)),
+          child:
+          Icon(icon, size: 16, color: const Color(0xFF7C3AED)),
         ),
         const SizedBox(width: 10),
         Expanded(
@@ -2283,9 +2715,9 @@ class _SubServicesSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DraggableScrollableSheet(
-      initialChildSize: 0.58,
-      minChildSize: 0.38,
-      maxChildSize: 0.9,
+      initialChildSize: 0.60,
+      minChildSize: 0.40,
+      maxChildSize: 0.92,
       expand: false,
       builder: (ctx, scrollCtrl) => Container(
         decoration: const BoxDecoration(
@@ -2296,34 +2728,54 @@ class _SubServicesSheet extends StatelessWidget {
             BoxShadow(
                 color: Color(0x1A000000),
                 blurRadius: 30,
-                offset: Offset(0, -4))
+                offset: Offset(0, -4)),
           ],
         ),
         child: Column(
           children: [
             Container(
-              margin:
-              const EdgeInsets.symmetric(vertical: 12),
+              margin: const EdgeInsets.only(top: 12),
               width: 42,
               height: 4,
               decoration: BoxDecoration(
                   color: const Color(0xFFE5E7EB),
                   borderRadius: BorderRadius.circular(2)),
             ),
-            Padding(
-              padding:
-              const EdgeInsets.fromLTRB(20, 0, 20, 14),
+            Container(
+              margin: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    _lighten(cat.color, 0.04),
+                    _darken(cat.color, 0.10),
+                  ],
+                ),
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [
+                  BoxShadow(
+                    color: cat.color.withOpacity(0.28),
+                    blurRadius: 16,
+                    spreadRadius: -2,
+                    offset: const Offset(0, 6),
+                  ),
+                ],
+              ),
               child: Row(
                 children: [
                   Container(
-                    width: 56,
-                    height: 56,
+                    width: 54,
+                    height: 54,
                     decoration: BoxDecoration(
-                        color: cat.bgColor,
-                        borderRadius:
-                        BorderRadius.circular(16)),
+                      color: Colors.white.withOpacity(0.20),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                          color: Colors.white.withOpacity(0.28)),
+                    ),
                     child: Icon(cat.categoryIcon,
-                        color: cat.color, size: 28),
+                        color: Colors.white, size: 26),
                   ),
                   const SizedBox(width: 14),
                   Expanded(
@@ -2332,47 +2784,59 @@ class _SubServicesSheet extends StatelessWidget {
                       CrossAxisAlignment.start,
                       children: [
                         Text(cat.title,
-                            style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                                color: cat.color)),
-                        const SizedBox(height: 3),
-                        Text(
+                            style: const TextStyle(
+                                fontSize: 17,
+                                fontWeight: FontWeight.w800,
+                                color: Colors.white,
+                                letterSpacing: 0.1)),
+                        const SizedBox(height: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 9, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.22),
+                            borderRadius:
+                            BorderRadius.circular(20),
+                          ),
+                          child: Text(
                             '${cat.subs.length} services available near you',
                             style: const TextStyle(
-                                fontSize: 12,
-                                color: Color(0xFF6B7280))),
+                                fontSize: 10,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.white),
+                          ),
+                        ),
                       ],
                     ),
                   ),
                   GestureDetector(
                     onTap: () => Navigator.pop(ctx),
                     child: Container(
-                      padding: const EdgeInsets.all(6),
-                      decoration: const BoxDecoration(
-                          color: Color(0xFFF3F4F6),
-                          shape: BoxShape.circle),
+                      padding: const EdgeInsets.all(7),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.22),
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                            color:
+                            Colors.white.withOpacity(0.30)),
+                      ),
                       child: const Icon(Icons.close_rounded,
-                          size: 18,
-                          color: Color(0xFF6B7280)),
+                          size: 16, color: Colors.white),
                     ),
                   ),
                 ],
               ),
             ),
-            const Divider(
-                height: 1, color: Color(0xFFF3F4F6)),
-            const SizedBox(height: 4),
             Expanded(
               child: GridView.builder(
                 controller: scrollCtrl,
-                padding: const EdgeInsets.fromLTRB(
-                    16, 10, 16, 24),
+                padding:
+                const EdgeInsets.fromLTRB(16, 4, 16, 28),
                 physics: const ClampingScrollPhysics(),
                 gridDelegate:
                 const SliverGridDelegateWithFixedCrossAxisCount(
                   crossAxisCount: 3,
-                  childAspectRatio: 0.84,
+                  childAspectRatio: 0.86,
                   crossAxisSpacing: 10,
                   mainAxisSpacing: 10,
                 ),
@@ -2396,6 +2860,10 @@ class _SubServicesSheet extends StatelessWidget {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SUB SERVICE ITEM
+// ─────────────────────────────────────────────────────────────────────────────
+
 class _SubServiceItem extends StatefulWidget {
   final _SubService sub;
   final List<_SubService> allSubs;
@@ -2412,8 +2880,7 @@ class _SubServiceItem extends StatefulWidget {
   });
 
   @override
-  State<_SubServiceItem> createState() =>
-      _SubServiceItemState();
+  State<_SubServiceItem> createState() => _SubServiceItemState();
 }
 
 class _SubServiceItemState extends State<_SubServiceItem> {
@@ -2425,6 +2892,35 @@ class _SubServiceItemState extends State<_SubServiceItem> {
       onTapDown: (_) => setState(() => _pressed = true),
       onTapUp: (_) {
         setState(() => _pressed = false);
+        if (widget.sub.name == 'Mid-Night Vehicle Emergency') {
+          Navigator.pop(context);
+          Navigator.push(
+            context,
+            PageRouteBuilder(
+              pageBuilder: (_, __, ___) =>
+              const MidNightEmergencyScreen(),
+              transitionsBuilder: (_, animation, __, child) {
+                final curved = CurvedAnimation(
+                    parent: animation,
+                    curve: Curves.easeOutCubic);
+                return FadeTransition(
+                  opacity: Tween<double>(begin: 0.0, end: 1.0)
+                      .animate(curved),
+                  child: SlideTransition(
+                    position: Tween<Offset>(
+                        begin: const Offset(0, 0.04),
+                        end: Offset.zero)
+                        .animate(curved),
+                    child: child,
+                  ),
+                );
+              },
+              transitionDuration:
+              const Duration(milliseconds: 280),
+            ),
+          );
+          return;
+        }
         Navigator.pop(context);
         Navigator.push(
           context,
@@ -2462,48 +2958,97 @@ class _SubServiceItemState extends State<_SubServiceItem> {
       },
       onTapCancel: () => setState(() => _pressed = false),
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 100),
+        duration: const Duration(milliseconds: 110),
         curve: Curves.easeOutCubic,
         transform: Matrix4.identity()
           ..scale(_pressed ? 0.92 : 1.0),
         transformAlignment: Alignment.center,
         decoration: BoxDecoration(
-          color: _pressed ? widget.bgColor : Colors.white,
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(18),
+          gradient: _pressed
+              ? LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              _lighten(widget.color, 0.06),
+              _darken(widget.color, 0.08),
+            ],
+          )
+              : LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Colors.white,
+              widget.bgColor.withOpacity(0.55),
+            ],
+          ),
           border: Border.all(
-              color: widget.color
-                  .withOpacity(_pressed ? 0.3 : 0.1)),
+            color: _pressed
+                ? Colors.transparent
+                : widget.color.withOpacity(0.14),
+            width: 1,
+          ),
           boxShadow: [
             BoxShadow(
-                color: widget.color.withOpacity(0.06),
-                blurRadius: 8,
-                offset: const Offset(0, 3))
+              color: widget.color
+                  .withOpacity(_pressed ? 0.20 : 0.07),
+              blurRadius: _pressed ? 6 : 10,
+              spreadRadius: -2,
+              offset: const Offset(0, 4),
+            ),
           ],
         ),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Container(
-              width: 46,
-              height: 46,
+              width: 48,
+              height: 48,
               decoration: BoxDecoration(
-                  color: widget.bgColor,
-                  shape: BoxShape.circle),
-              child: Icon(widget.sub.icon,
-                  color: widget.color, size: 22),
+                shape: BoxShape.circle,
+                gradient: _pressed
+                    ? LinearGradient(colors: [
+                  Colors.white.withOpacity(0.25),
+                  Colors.white.withOpacity(0.12),
+                ])
+                    : LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    widget.bgColor,
+                    _lighten(widget.color, 0.28),
+                  ],
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: widget.color.withOpacity(0.12),
+                    blurRadius: 6,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Icon(
+                widget.sub.icon,
+                color: _pressed ? Colors.white : widget.color,
+                size: 22,
+              ),
             ),
-            const SizedBox(height: 7),
+            const SizedBox(height: 8),
             Padding(
-              padding:
-              const EdgeInsets.symmetric(horizontal: 4),
-              child: Text(widget.sub.name,
-                  style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: widget.color),
-                  textAlign: TextAlign.center,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis),
+              padding: const EdgeInsets.symmetric(horizontal: 5),
+              child: Text(
+                widget.sub.name,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: _pressed ? Colors.white : widget.color,
+                  letterSpacing: 0.1,
+                  height: 1.2,
+                ),
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
           ],
         ),
