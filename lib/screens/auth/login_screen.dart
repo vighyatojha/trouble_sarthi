@@ -3,7 +3,6 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:local_auth/local_auth.dart';
 import 'signup_screen.dart';
 import 'complete_profile_screen.dart';
 import 'package:trouble_sarthi/screens/home_screen.dart';
@@ -20,15 +19,12 @@ class _LoginScreenState extends State<LoginScreen>
     with TickerProviderStateMixin {
   final _identifierCtrl = TextEditingController();
   final _passwordCtrl   = TextEditingController();
-  final _localAuth      = LocalAuthentication();
 
-  bool _useUsername        = false;
-  bool _obscurePassword    = true;
-  bool _googleLoading      = false;
-  bool _facebookLoading    = false;
-  bool _signInLoading      = false;
-  bool _biometricLoading   = false;
-  bool _biometricAvailable = false;
+  bool _useUsername     = false;
+  bool _obscurePassword = true;
+  bool _googleLoading   = false;
+  bool _facebookLoading = false;
+  bool _signInLoading   = false;
 
   String? _identifierError;
   String? _passwordError;
@@ -61,8 +57,6 @@ class _LoginScreenState extends State<LoginScreen>
         begin: const Offset(0.08, 0), end: Offset.zero)
         .animate(CurvedAnimation(parent: _fieldCtrl, curve: Curves.easeOutCubic));
     _fieldCtrl.forward();
-
-    _checkBiometric();
   }
 
   @override
@@ -84,15 +78,6 @@ class _LoginScreenState extends State<LoginScreen>
       _identifierCtrl.clear();
     });
     _fieldCtrl.forward();
-  }
-
-  Future<void> _checkBiometric() async {
-    if (!mounted) return;
-    try {
-      final canCheck    = await _localAuth.canCheckBiometrics;
-      final isSupported = await _localAuth.isDeviceSupported();
-      if (mounted) setState(() => _biometricAvailable = canCheck && isSupported);
-    } catch (_) {}
   }
 
   void _handleAuthResult(AuthResult result) {
@@ -190,11 +175,11 @@ class _LoginScreenState extends State<LoginScreen>
     } on FirebaseAuthException catch (e) {
       if (mounted) {
         final msg = switch (e.code) {
-          'user-not-found'   => 'No account found with this email.',
-          'wrong-password'   => 'Incorrect password. Please try again.',
-          'invalid-email'    => 'Please enter a valid email.',
+          'user-not-found'     => 'No account found with this email.',
+          'wrong-password'     => 'Incorrect password. Please try again.',
+          'invalid-email'      => 'Please enter a valid email.',
           'invalid-credential' => 'Incorrect email or password.',
-          _                  => e.message ?? 'Login failed.',
+          _                    => e.message ?? 'Login failed.',
         };
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(msg),
@@ -206,47 +191,6 @@ class _LoginScreenState extends State<LoginScreen>
       }
     } finally {
       if (mounted) setState(() => _signInLoading = false);
-    }
-  }
-
-  Future<void> _biometricLogin() async {
-    setState(() => _biometricLoading = true);
-    try {
-      final authenticated = await _localAuth.authenticate(
-        localizedReason: 'Authenticate to sign in to Trouble Sarthi',
-        biometricOnly: true,
-      );
-      if (authenticated && mounted) {
-        final user = FirebaseAuth.instance.currentUser;
-        if (user != null) {
-          Navigator.pushAndRemoveUntil(
-            context,
-            PageRouteBuilder(
-              pageBuilder: (_, a, __) => const HomeScreen(),
-              transitionsBuilder: (_, a, __, child) =>
-                  FadeTransition(opacity: a, child: child),
-              transitionDuration: const Duration(milliseconds: 350),
-            ),
-                (route) => false,
-          );
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('No saved session. Please sign in with email first.'),
-            backgroundColor: Color(0xFFD97706),
-            behavior: SnackBarBehavior.floating,
-          ));
-        }
-      }
-    } on LocalAuthException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Biometric error: ${e.toString()}'),
-          backgroundColor: const Color(0xFFDC2626),
-          behavior: SnackBarBehavior.floating,
-        ));
-      }
-    } finally {
-      if (mounted) setState(() => _biometricLoading = false);
     }
   }
 
@@ -328,14 +272,14 @@ class _LoginScreenState extends State<LoginScreen>
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
                             const SizedBox(height: 8),
-                            _HeroSection(biometricAvailable: _biometricAvailable),
+                            const _HeroSection(),
                             const SizedBox(height: 24),
                             _GlassCard(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.stretch,
                                 children: [
 
-                                  // ── UPGRADED TOGGLE ──────────────────
+                                  // ── TOGGLE ───────────────────────────
                                   _AnimatedModeToggle(
                                     useUsername: _useUsername,
                                     onToggle: _switchMode,
@@ -404,14 +348,6 @@ class _LoginScreenState extends State<LoginScreen>
                                     loading: _signInLoading,
                                     onTap: _signIn,
                                   ),
-
-                                  if (_biometricAvailable) ...[
-                                    const SizedBox(height: 10),
-                                    _BiometricButton(
-                                      loading: _biometricLoading,
-                                      onTap: _biometricLogin,
-                                    ),
-                                  ],
 
                                   const SizedBox(height: 20),
 
@@ -520,7 +456,7 @@ class _LoginScreenState extends State<LoginScreen>
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  ANIMATED MODE TOGGLE  ← taller + smooth sliding gradient pill
+//  ANIMATED MODE TOGGLE
 // ═══════════════════════════════════════════════════════════════════════════
 class _AnimatedModeToggle extends StatelessWidget {
   final bool useUsername;
@@ -534,7 +470,7 @@ class _AnimatedModeToggle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 56,                          // ← taller pill bar
+      height: 56,
       padding: const EdgeInsets.all(5),
       decoration: BoxDecoration(
         color: const Color(0xFF0A0A10),
@@ -543,7 +479,6 @@ class _AnimatedModeToggle extends StatelessWidget {
       ),
       child: Stack(
         children: [
-          // ── Smoothly sliding gradient pill ──────────────────────────
           AnimatedAlign(
             duration: const Duration(milliseconds: 300),
             curve: Curves.easeInOutCubic,
@@ -570,8 +505,6 @@ class _AnimatedModeToggle extends StatelessWidget {
               ),
             ),
           ),
-
-          // ── Tap targets + labels on top ──────────────────────────────
           Row(children: [
             _ToggleTab(
               label: 'Email',
@@ -624,7 +557,6 @@ class _ToggleTab extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Icon cross-fades between active/inactive color
                 AnimatedSwitcher(
                   duration: const Duration(milliseconds: 220),
                   child: Icon(
@@ -648,7 +580,7 @@ class _ToggleTab extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  LOGIN FIELD  ← animated error, animated border glow
+//  LOGIN FIELD
 // ═══════════════════════════════════════════════════════════════════════════
 class _LoginField extends StatelessWidget {
   final TextEditingController controller;
@@ -733,8 +665,6 @@ class _LoginField extends StatelessWidget {
           ),
         ),
       ),
-
-      // ── Animated error slide-in ────────────────────────────────────────
       AnimatedSize(
         duration: const Duration(milliseconds: 220),
         curve: Curves.easeOutCubic,
@@ -839,11 +769,10 @@ class _TroubleSarthiLogo extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  HERO
+//  HERO  ← biometric param removed
 // ═══════════════════════════════════════════════════════════════════════════
 class _HeroSection extends StatelessWidget {
-  final bool biometricAvailable;
-  const _HeroSection({required this.biometricAvailable});
+  const _HeroSection();
 
   @override
   Widget build(BuildContext context) {
@@ -877,9 +806,7 @@ class _HeroSection extends StatelessWidget {
               letterSpacing: -1.2)),
       const SizedBox(height: 6),
       Text(
-        biometricAvailable
-            ? 'Sign in with email, username or biometrics'
-            : 'Sign in to continue',
+        'Sign in to continue',
         style: TextStyle(fontSize: 13, color: Colors.white.withOpacity(0.4)),
       ),
     ]);
@@ -952,48 +879,6 @@ class _PrimaryLoginButton extends StatelessWidget {
                   fontSize: 15,
                   fontWeight: FontWeight.w700,
                   letterSpacing: 0.3)),
-        ),
-      ),
-    );
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  BIOMETRIC BUTTON
-// ═══════════════════════════════════════════════════════════════════════════
-class _BiometricButton extends StatelessWidget {
-  final bool loading;
-  final VoidCallback onTap;
-  const _BiometricButton({required this.loading, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: loading ? null : onTap,
-      child: Container(
-        height: 48,
-        decoration: BoxDecoration(
-          color: const Color(0xFF0F0F14),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-              color: const Color(0xFF6366F1).withOpacity(0.35), width: 1),
-        ),
-        child: Center(
-          child: loading
-              ? const SizedBox(
-              width: 18, height: 18,
-              child: CircularProgressIndicator(
-                  color: Color(0xFF818CF8), strokeWidth: 2))
-              : Row(mainAxisSize: MainAxisSize.min, children: [
-            const Icon(Icons.fingerprint_rounded,
-                color: Color(0xFF818CF8), size: 22),
-            const SizedBox(width: 10),
-            const Text('Use Biometrics',
-                style: TextStyle(
-                    color: Color(0xFF818CF8),
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600)),
-          ]),
         ),
       ),
     );
@@ -1093,7 +978,7 @@ class _GoogleGPainter extends CustomPainter {
     final oval = Rect.fromCircle(center: Offset(cx, cy), radius: r);
 
     paint.color = const Color(0xFFEA4335);
-    canvas.drawArc(oval, math.pi * 1.25, math.pi * 0.75, false, paint);
+    canvas.drawArc(oval, math.pi * 1.25, math.pi * 0.70, false, paint);
     paint.color = const Color(0xFF4285F4);
     canvas.drawArc(oval, -math.pi * 0.25, math.pi * 0.75, false, paint);
     paint.color = const Color(0xFFFBBC05);

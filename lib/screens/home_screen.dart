@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:trouble_sarthi/screens/messages_screen.dart' show NotificationCountNotifier, MessagesScreen;
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:trouble_sarthi/screens/messages_screen.dart'
+    show NotificationCountNotifier, MessagesScreen;
 import 'package:trouble_sarthi/screens/profile_screen.dart';
 import 'auth/login_screen.dart';
 import 'messages_screen.dart' show NotificationCountNotifier, ServicesScreen;
@@ -12,6 +15,7 @@ import 'booking_screen.dart';
 import 'location_picker_screen.dart';
 import 'helper_list_screen.dart';
 import 'midnight_emergency_screen.dart';
+import 'home_skeleton.dart'; // ← your skeleton file
 
 // ─────────────────────────────────────────────────────────────────────────────
 // COLOR HELPERS
@@ -281,30 +285,6 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PROFILE PLACEHOLDER
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _ProfilePlaceholder extends StatelessWidget {
-  const _ProfilePlaceholder();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Scaffold(
-      backgroundColor: Color(0xFFF4F6FB),
-      body: Center(
-        child: Text(
-          'Profile',
-          style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-              color: Color(0xFF7C3AED)),
-        ),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // FLOATING PILL BOTTOM NAV
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -414,8 +394,8 @@ class _NavItem extends StatelessWidget {
             AnimatedContainer(
               duration: const Duration(milliseconds: 200),
               curve: Curves.easeOutCubic,
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 12, vertical: 4),
+              padding:
+              const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
               decoration: BoxDecoration(
                 color: active
                     ? const Color(0xFFEDE9FE)
@@ -434,8 +414,7 @@ class _NavItem extends StatelessWidget {
               style: TextStyle(
                 fontSize: 9,
                 color: active ? activeColor : inactiveColor,
-                fontWeight:
-                active ? FontWeight.w700 : FontWeight.w500,
+                fontWeight: active ? FontWeight.w700 : FontWeight.w500,
               ),
               child: Text(label),
             ),
@@ -497,8 +476,8 @@ class _MessageNavItem extends StatelessWidget {
                         decoration: BoxDecoration(
                           color: const Color(0xFFDC2626),
                           shape: BoxShape.circle,
-                          border: Border.all(
-                              color: Colors.white, width: 1.5),
+                          border:
+                          Border.all(color: Colors.white, width: 1.5),
                         ),
                       ),
                     ),
@@ -511,8 +490,7 @@ class _MessageNavItem extends StatelessWidget {
               style: TextStyle(
                 fontSize: 9,
                 color: active ? activeColor : inactiveColor,
-                fontWeight:
-                active ? FontWeight.w700 : FontWeight.w500,
+                fontWeight: active ? FontWeight.w700 : FontWeight.w500,
               ),
               child: const Text('Messages'),
             ),
@@ -568,14 +546,14 @@ class _BookingNavItem extends StatelessWidget {
                 boxShadow: active
                     ? [
                   BoxShadow(
-                    color: const Color(0xFF7C3AED)
-                        .withOpacity(0.40),
+                    color:
+                    const Color(0xFF7C3AED).withOpacity(0.40),
                     blurRadius: 12,
                     offset: const Offset(0, 3),
                   ),
                   BoxShadow(
-                    color: const Color(0xFFEC4899)
-                        .withOpacity(0.20),
+                    color:
+                    const Color(0xFFEC4899).withOpacity(0.20),
                     blurRadius: 8,
                     offset: const Offset(0, 2),
                   ),
@@ -584,9 +562,7 @@ class _BookingNavItem extends StatelessWidget {
               ),
               child: Icon(
                 Icons.calendar_today_rounded,
-                color: active
-                    ? Colors.white
-                    : Colors.white.withOpacity(0.9),
+                color: active ? Colors.white : Colors.white.withOpacity(0.9),
                 size: 19,
               ),
             ),
@@ -598,8 +574,7 @@ class _BookingNavItem extends StatelessWidget {
                 color: active
                     ? const Color(0xFF7C3AED)
                     : const Color(0xFFB0B8C8),
-                fontWeight:
-                active ? FontWeight.w700 : FontWeight.w500,
+                fontWeight: active ? FontWeight.w700 : FontWeight.w500,
               ),
               child: const Text('Bookings'),
             ),
@@ -611,7 +586,7 @@ class _BookingNavItem extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HOME CONTENT
+// HOME CONTENT  ← CONNECTIVITY + SKELETON INTEGRATED HERE
 // ─────────────────────────────────────────────────────────────────────────────
 
 class HomeContent extends StatefulWidget {
@@ -626,6 +601,11 @@ class _HomeContentState extends State<HomeContent>
   @override
   bool get wantKeepAlive => true;
 
+  // ── Connectivity state ──────────────────────────────────────────────────────
+  bool _isLoading = true;
+  bool _hasInternet = true;
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
+
   bool _locationChecked = false;
   static final _emergencyCategory =
   _kCategories.firstWhere((c) => c.title == 'Emergency');
@@ -633,10 +613,43 @@ class _HomeContentState extends State<HomeContent>
   @override
   void initState() {
     super.initState();
+    _checkConnectivity();
     WidgetsBinding.instance
         .addPostFrameCallback((_) => _checkLocation());
   }
 
+  @override
+  void dispose() {
+    _connectivitySub?.cancel();
+    super.dispose();
+  }
+
+  // ── Connectivity check ──────────────────────────────────────────────────────
+  Future<void> _checkConnectivity() async {
+    try {
+      final results = await Connectivity().checkConnectivity();
+      final hasNet = results.any((r) => r != ConnectivityResult.none);
+      if (mounted) {
+        setState(() {
+          _hasInternet = hasNet;
+          _isLoading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isLoading = false);
+    }
+
+    // Listen for live changes
+    _connectivitySub = Connectivity()
+        .onConnectivityChanged
+        .listen((List<ConnectivityResult> results) {
+      if (!mounted) return;
+      final hasNet = results.any((r) => r != ConnectivityResult.none);
+      setState(() => _hasInternet = hasNet);
+    });
+  }
+
+  // ── Location dialog ─────────────────────────────────────────────────────────
   Future<void> _checkLocation() async {
     if (_locationChecked) return;
     _locationChecked = true;
@@ -693,12 +706,11 @@ class _HomeContentState extends State<HomeContent>
           final curved = CurvedAnimation(
               parent: animation, curve: Curves.easeOutCubic);
           return FadeTransition(
-            opacity: Tween<double>(begin: 0.0, end: 1.0)
-                .animate(curved),
+            opacity:
+            Tween<double>(begin: 0.0, end: 1.0).animate(curved),
             child: SlideTransition(
               position: Tween<Offset>(
-                  begin: const Offset(0, 0.06),
-                  end: Offset.zero)
+                  begin: const Offset(0, 0.06), end: Offset.zero)
                   .animate(curved),
               child: child,
             ),
@@ -709,9 +721,27 @@ class _HomeContentState extends State<HomeContent>
     );
   }
 
+  // ── Build ───────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     super.build(context);
+
+    // ── Show skeleton while checking connectivity / loading ──────────────────
+    if (_isLoading) {
+      return const HomeSkeletonScreen();
+    }
+
+    // ── Show no-internet screen ──────────────────────────────────────────────
+    if (!_hasInternet) {
+      return HomeNoInternetScreen(
+        onRetry: () async {
+          setState(() => _isLoading = true);
+          await _checkConnectivity();
+        },
+      );
+    }
+
+    // ── Normal home content ──────────────────────────────────────────────────
     return CustomScrollView(
       physics: const ClampingScrollPhysics(),
       slivers: [
@@ -784,11 +814,8 @@ class _HomeContentState extends State<HomeContent>
             ),
           ),
         ),
-        // ── NEW: How It Works ──────────────────────────────────────────────
         const SliverToBoxAdapter(child: _HowItWorksSection()),
-        // ── NEW: App Footer ────────────────────────────────────────────────
         const SliverToBoxAdapter(child: _AppFooter()),
-        // Bottom padding so content clears the floating nav bar
         const SliverToBoxAdapter(child: SizedBox(height: 75)),
       ],
     );
@@ -913,8 +940,7 @@ class _AuthHeaderContent extends StatelessWidget {
           final d = snap.data!.data() as Map<String, dynamic>;
           final fn = d['fullName'] as String? ?? '';
           if (fn.isNotEmpty) firstName = fn.split(' ').first;
-          final pl =
-          d['primaryLocation'] as Map<String, dynamic>?;
+          final pl = d['primaryLocation'] as Map<String, dynamic>?;
           if (pl != null) {
             final city = pl['city'] as String? ?? '';
             final sub = pl['subLocality'] as String? ?? '';
@@ -1077,8 +1103,7 @@ class _ProfileAvatar extends StatelessWidget {
               decoration: BoxDecoration(
                 color: const Color(0xFF22C55E),
                 shape: BoxShape.circle,
-                border:
-                Border.all(color: Colors.white, width: 1.5),
+                border: Border.all(color: Colors.white, width: 1.5),
               ),
             ),
           ),
@@ -1111,8 +1136,7 @@ class _ProfileAvatar extends StatelessWidget {
                 leading: const Icon(Icons.my_location_rounded,
                     color: Color(0xFF7C3AED)),
                 title: const Text('Update Location',
-                    style:
-                    TextStyle(fontWeight: FontWeight.w600)),
+                    style: TextStyle(fontWeight: FontWeight.w600)),
                 onTap: () {
                   Navigator.pop(context);
                   _pushFade(context, const LocationPickerScreen());
@@ -1226,8 +1250,7 @@ class _SosBannerState extends State<_SosBanner>
   void initState() {
     super.initState();
     _pulse = AnimationController(
-        vsync: this,
-        duration: const Duration(milliseconds: 1400))
+        vsync: this, duration: const Duration(milliseconds: 1400))
       ..repeat(reverse: true);
   }
 
@@ -1294,8 +1317,8 @@ class _SosBannerState extends State<_SosBanner>
             ),
           ),
           Padding(
-            padding: const EdgeInsets.symmetric(
-                horizontal: 18, vertical: 16),
+            padding:
+            const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
@@ -1309,8 +1332,8 @@ class _SosBannerState extends State<_SosBanner>
                         padding: const EdgeInsets.symmetric(
                             horizontal: 8, vertical: 3),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF0D7377)
-                              .withOpacity(0.28),
+                          color:
+                          const Color(0xFF0D7377).withOpacity(0.28),
                           borderRadius: BorderRadius.circular(6),
                           border: Border.all(
                               color: const Color(0xFF14FFEC)
@@ -1320,8 +1343,7 @@ class _SosBannerState extends State<_SosBanner>
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Icon(Icons.circle,
-                                size: 6,
-                                color: Color(0xFF14FFEC)),
+                                size: 6, color: Color(0xFF14FFEC)),
                             SizedBox(width: 5),
                             Text(
                               'LIVE EMERGENCY SUPPORT',
@@ -1384,8 +1406,7 @@ class _SosBannerState extends State<_SosBanner>
                     borderRadius: BorderRadius.circular(16),
                     boxShadow: [
                       BoxShadow(
-                        color: const Color(0xFF0D7377)
-                            .withOpacity(0.50),
+                        color: const Color(0xFF0D7377).withOpacity(0.50),
                         blurRadius: 12,
                         offset: const Offset(0, 4),
                       ),
@@ -1589,8 +1610,8 @@ class _StatChip extends StatelessWidget {
   Widget build(BuildContext context) {
     return Expanded(
       child: Container(
-        padding: const EdgeInsets.symmetric(
-            vertical: 10, horizontal: 10),
+        padding:
+        const EdgeInsets.symmetric(vertical: 10, horizontal: 10),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(14),
@@ -1623,8 +1644,7 @@ class _StatChip extends StatelessWidget {
                           color: color)),
                   Text(label,
                       style: const TextStyle(
-                          fontSize: 9,
-                          color: Color(0xFF9CA3AF))),
+                          fontSize: 9, color: Color(0xFF9CA3AF))),
                 ],
               ),
             ),
@@ -1667,8 +1687,7 @@ class _CategoryCardState extends State<_CategoryCard> {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 130),
         curve: Curves.easeOutCubic,
-        transform: Matrix4.identity()
-          ..scale(_pressed ? 0.955 : 1.0),
+        transform: Matrix4.identity()..scale(_pressed ? 0.955 : 1.0),
         transformAlignment: Alignment.center,
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(24),
@@ -1679,8 +1698,7 @@ class _CategoryCardState extends State<_CategoryCard> {
           ),
           boxShadow: [
             BoxShadow(
-              color:
-              cat.color.withOpacity(_pressed ? 0.20 : 0.32),
+              color: cat.color.withOpacity(_pressed ? 0.20 : 0.32),
               blurRadius: _pressed ? 6 : 20,
               spreadRadius: -3,
               offset: const Offset(0, 7),
@@ -1725,8 +1743,7 @@ class _CategoryCardState extends State<_CategoryCard> {
                 ),
               ),
               Padding(
-                padding:
-                const EdgeInsets.fromLTRB(14, 14, 12, 13),
+                padding: const EdgeInsets.fromLTRB(14, 14, 12, 13),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -1790,7 +1807,7 @@ class _CategoryCardState extends State<_CategoryCard> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HOW IT WORKS SECTION  ← NEW
+// HOW IT WORKS SECTION
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _HowItWorksSection extends StatelessWidget {
@@ -1851,7 +1868,8 @@ class _HowItWorksSection extends StatelessWidget {
                   color: Color(0xFF7C3AED),
                   bgColor: Color(0xFFEDE9FE),
                   title: 'Search a Service',
-                  desc: 'Pick from 12 categories or search directly by name.',
+                  desc:
+                  'Pick from 12 categories or search directly by name.',
                   isLast: false,
                 ),
                 _StepTile(
@@ -1859,7 +1877,8 @@ class _HowItWorksSection extends StatelessWidget {
                   color: Color(0xFF0891B2),
                   bgColor: Color(0xFFCFFAFE),
                   title: 'Choose a Helper',
-                  desc: 'Browse verified, rated helpers available near you.',
+                  desc:
+                  'Browse verified, rated helpers available near you.',
                   isLast: false,
                 ),
                 _StepTile(
@@ -1867,7 +1886,8 @@ class _HowItWorksSection extends StatelessWidget {
                   color: Color(0xFF059669),
                   bgColor: Color(0xFFD1FAE5),
                   title: 'Get It Done',
-                  desc: 'Book instantly, chat live, and rate your experience.',
+                  desc:
+                  'Book instantly, chat live, and rate your experience.',
                   isLast: true,
                 ),
               ],
@@ -1958,7 +1978,7 @@ class _StepTile extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// APP FOOTER  ← NEW
+// APP FOOTER
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _AppFooter extends StatelessWidget {
@@ -1990,7 +2010,6 @@ class _AppFooter extends StatelessWidget {
       ),
       child: Stack(
         children: [
-          // Decorative circles
           Positioned(
             right: -22,
             top: -22,
@@ -2018,7 +2037,6 @@ class _AppFooter extends StatelessWidget {
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Brand row
               Row(
                 children: [
                   Container(
@@ -2051,7 +2069,6 @@ class _AppFooter extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 18),
-              // Thin divider
               Container(
                 height: 1,
                 decoration: BoxDecoration(
@@ -2065,7 +2082,6 @@ class _AppFooter extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 18),
-              // Trust badges
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceAround,
                 children: const [
@@ -2084,7 +2100,6 @@ class _AppFooter extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 18),
-              // Bottom copyright strip
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.symmetric(vertical: 11),
@@ -2126,10 +2141,10 @@ class _FooterBadge extends StatelessWidget {
           decoration: BoxDecoration(
             color: Colors.white.withOpacity(0.10),
             shape: BoxShape.circle,
-            border:
-            Border.all(color: Colors.white.withOpacity(0.18)),
+            border: Border.all(color: Colors.white.withOpacity(0.18)),
           ),
-          child: Icon(icon, color: const Color(0xFFC4B5FD), size: 18),
+          child:
+          Icon(icon, color: const Color(0xFFC4B5FD), size: 18),
         ),
         const SizedBox(height: 7),
         Text(
@@ -2186,8 +2201,8 @@ class _SearchScreenState extends State<SearchScreen> {
           : _kCategories
           .where((c) =>
       c.title.toLowerCase().contains(q) ||
-          c.subs.any(
-                  (s) => s.name.toLowerCase().contains(q)))
+          c.subs
+              .any((s) => s.name.toLowerCase().contains(q)))
           .toList();
     });
   }
@@ -2324,8 +2339,7 @@ class _SearchScreenState extends State<SearchScreen> {
               itemBuilder: (_, i) {
                 final cat = _results[i];
                 return Padding(
-                  padding:
-                  const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.only(bottom: 10),
                   child: RepaintBoundary(
                     child: _SearchResultCard(
                       cat: cat,
@@ -2348,13 +2362,10 @@ class _SearchResultCard extends StatefulWidget {
   final String query;
   final VoidCallback onTap;
   const _SearchResultCard(
-      {required this.cat,
-        required this.query,
-        required this.onTap});
+      {required this.cat, required this.query, required this.onTap});
 
   @override
-  State<_SearchResultCard> createState() =>
-      _SearchResultCardState();
+  State<_SearchResultCard> createState() => _SearchResultCardState();
 }
 
 class _SearchResultCardState extends State<_SearchResultCard> {
@@ -2380,8 +2391,7 @@ class _SearchResultCardState extends State<_SearchResultCard> {
       onTapCancel: () => setState(() => _pressed = false),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 100),
-        transform: Matrix4.identity()
-          ..scale(_pressed ? 0.97 : 1.0),
+        transform: Matrix4.identity()..scale(_pressed ? 0.97 : 1.0),
         transformAlignment: Alignment.center,
         decoration: BoxDecoration(
           gradient: LinearGradient(
@@ -2392,8 +2402,7 @@ class _SearchResultCardState extends State<_SearchResultCard> {
           borderRadius: BorderRadius.circular(22),
           boxShadow: [
             BoxShadow(
-              color:
-              cat.color.withOpacity(_pressed ? 0.12 : 0.06),
+              color: cat.color.withOpacity(_pressed ? 0.12 : 0.06),
               blurRadius: _pressed ? 4 : 10,
               offset: const Offset(0, 3),
             ),
@@ -2425,8 +2434,7 @@ class _SearchResultCardState extends State<_SearchResultCard> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: Column(
-                      crossAxisAlignment:
-                      CrossAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(cat.title,
                             style: TextStyle(
@@ -2447,10 +2455,8 @@ class _SearchResultCardState extends State<_SearchResultCard> {
                     height: 28,
                     decoration: BoxDecoration(
                         color: cat.color, shape: BoxShape.circle),
-                    child: const Icon(
-                        Icons.chevron_right_rounded,
-                        color: Colors.white,
-                        size: 18),
+                    child: const Icon(Icons.chevron_right_rounded,
+                        color: Colors.white, size: 18),
                   ),
                 ],
               ),
@@ -2470,8 +2476,8 @@ class _SearchResultCardState extends State<_SearchResultCard> {
                       borderRadius:
                       BorderRadius.circular(20),
                       border: Border.all(
-                          color: cat.color
-                              .withOpacity(0.20)),
+                          color:
+                          cat.color.withOpacity(0.20)),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
@@ -2482,8 +2488,7 @@ class _SearchResultCardState extends State<_SearchResultCard> {
                         Text(s.name,
                             style: TextStyle(
                                 fontSize: 11,
-                                fontWeight:
-                                FontWeight.w600,
+                                fontWeight: FontWeight.w600,
                                 color: cat.color)),
                       ],
                     ),
@@ -2515,8 +2520,7 @@ class _EmptySearch extends StatelessWidget {
               width: 80,
               height: 80,
               decoration: const BoxDecoration(
-                  color: Color(0xFFEDE9FE),
-                  shape: BoxShape.circle),
+                  color: Color(0xFFEDE9FE), shape: BoxShape.circle),
               child: const Icon(Icons.search_off_rounded,
                   size: 38, color: Color(0xFF7C3AED)),
             ),
@@ -2556,8 +2560,7 @@ class _LocationAlertDialog extends StatelessWidget {
   Widget build(BuildContext context) {
     return Dialog(
       backgroundColor: Colors.transparent,
-      insetPadding:
-      const EdgeInsets.symmetric(horizontal: 24),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24),
       child: Container(
         padding: const EdgeInsets.all(28),
         decoration: BoxDecoration(
@@ -2685,8 +2688,7 @@ class _Perk extends StatelessWidget {
           decoration: BoxDecoration(
               color: const Color(0xFFEDE9FE),
               borderRadius: BorderRadius.circular(8)),
-          child:
-          Icon(icon, size: 16, color: const Color(0xFF7C3AED)),
+          child: Icon(icon, size: 16, color: const Color(0xFF7C3AED)),
         ),
         const SizedBox(width: 10),
         Expanded(
@@ -2780,8 +2782,7 @@ class _SubServicesSheet extends StatelessWidget {
                   const SizedBox(width: 14),
                   Expanded(
                     child: Column(
-                      crossAxisAlignment:
-                      CrossAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(cat.title,
                             style: const TextStyle(
@@ -2795,8 +2796,7 @@ class _SubServicesSheet extends StatelessWidget {
                               horizontal: 9, vertical: 3),
                           decoration: BoxDecoration(
                             color: Colors.white.withOpacity(0.22),
-                            borderRadius:
-                            BorderRadius.circular(20),
+                            borderRadius: BorderRadius.circular(20),
                           ),
                           child: Text(
                             '${cat.subs.length} services available near you',
@@ -2817,8 +2817,7 @@ class _SubServicesSheet extends StatelessWidget {
                         color: Colors.white.withOpacity(0.22),
                         shape: BoxShape.circle,
                         border: Border.all(
-                            color:
-                            Colors.white.withOpacity(0.30)),
+                            color: Colors.white.withOpacity(0.30)),
                       ),
                       child: const Icon(Icons.close_rounded,
                           size: 16, color: Colors.white),
@@ -2830,8 +2829,7 @@ class _SubServicesSheet extends StatelessWidget {
             Expanded(
               child: GridView.builder(
                 controller: scrollCtrl,
-                padding:
-                const EdgeInsets.fromLTRB(16, 4, 16, 28),
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
                 physics: const ClampingScrollPhysics(),
                 gridDelegate:
                 const SliverGridDelegateWithFixedCrossAxisCount(
@@ -2901,8 +2899,7 @@ class _SubServiceItemState extends State<_SubServiceItem> {
               const MidNightEmergencyScreen(),
               transitionsBuilder: (_, animation, __, child) {
                 final curved = CurvedAnimation(
-                    parent: animation,
-                    curve: Curves.easeOutCubic);
+                    parent: animation, curve: Curves.easeOutCubic);
                 return FadeTransition(
                   opacity: Tween<double>(begin: 0.0, end: 1.0)
                       .animate(curved),
@@ -2915,8 +2912,7 @@ class _SubServiceItemState extends State<_SubServiceItem> {
                   ),
                 );
               },
-              transitionDuration:
-              const Duration(milliseconds: 280),
+              transitionDuration: const Duration(milliseconds: 280),
             ),
           );
           return;
@@ -2937,8 +2933,7 @@ class _SubServiceItemState extends State<_SubServiceItem> {
             ),
             transitionsBuilder: (_, animation, __, child) {
               final curved = CurvedAnimation(
-                  parent: animation,
-                  curve: Curves.easeOutCubic);
+                  parent: animation, curve: Curves.easeOutCubic);
               return FadeTransition(
                 opacity: Tween<double>(begin: 0.0, end: 1.0)
                     .animate(curved),
@@ -2951,8 +2946,7 @@ class _SubServiceItemState extends State<_SubServiceItem> {
                 ),
               );
             },
-            transitionDuration:
-            const Duration(milliseconds: 260),
+            transitionDuration: const Duration(milliseconds: 260),
           ),
         );
       },
@@ -3061,17 +3055,15 @@ class _SubServiceItemState extends State<_SubServiceItem> {
 // SHARED HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
-void _pushFade(BuildContext context, Widget page,
-    {int ms = 260}) {
+void _pushFade(BuildContext context, Widget page, {int ms = 260}) {
   Navigator.push(
     context,
     PageRouteBuilder(
       pageBuilder: (_, __, ___) => page,
-      transitionsBuilder: (_, animation, __, child) =>
-          FadeTransition(
-              opacity: CurvedAnimation(
-                  parent: animation, curve: Curves.easeOut),
-              child: child),
+      transitionsBuilder: (_, animation, __, child) => FadeTransition(
+          opacity: CurvedAnimation(
+              parent: animation, curve: Curves.easeOut),
+          child: child),
       transitionDuration: Duration(milliseconds: ms),
     ),
   );

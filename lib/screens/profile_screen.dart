@@ -1523,15 +1523,10 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
   bool _quickRequest = true;
   bool _autoFill     = true;
 
-  // ── Security prefs ───────────────────────────────────────────────────────
-  bool _biometric = false;
-
   // ── Emergency prefs ──────────────────────────────────────────────────────
   bool _sosShortcut = true;
 
   bool _loadingPrefs = true;
-
-  final LocalAuthentication _localAuth = LocalAuthentication();
 
   @override
   void initState() {
@@ -1544,7 +1539,10 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
     if (uid.isEmpty) { setState(() => _loadingPrefs = false); return; }
     try {
-      final snap = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+      final snap = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .get();
       final d     = snap.data() ?? {};
       final prefs = d['prefs']             as Map<String, dynamic>? ?? {};
       final emerg = d['emergencySettings'] as Map<String, dynamic>? ?? {};
@@ -1554,7 +1552,6 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
           _notifSafety   = prefs['notifSafety']   as bool? ?? true;
           _quickRequest  = prefs['quickRequest']  as bool? ?? true;
           _autoFill      = prefs['autoFill']      as bool? ?? true;
-          _biometric     = prefs['biometric']     as bool? ?? false;
           _sosShortcut   = emerg['sosShortcut']   as bool? ?? true;
           _loadingPrefs  = false;
         });
@@ -1577,61 +1574,10 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
   }
 
   // ── Toggle helper ─────────────────────────────────────────────────────────
-  void _toggle(String section, String key, bool current, void Function(bool) setter) {
+  void _toggle(String section, String key, bool current,
+      void Function(bool) setter) {
     setState(() => setter(!current));
     _savePref(section, key, !current);
-  }
-
-  // ── Biometric toggle — local_auth v3 API ──────────────────────────────────
-  Future<void> _toggleBiometric() async {
-    final canCheck    = await _localAuth.canCheckBiometrics;
-    final isSupported = await _localAuth.isDeviceSupported();
-
-    if (!canCheck || !isSupported) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Biometric authentication is not available on this device.'),
-          backgroundColor: Color(0xFFDC2626),
-        ));
-      }
-      return;
-    }
-
-    if (!_biometric) {
-      try {
-        // local_auth v3: biometricOnly directly on authenticate()
-        final authenticated = await _localAuth.authenticate(
-          localizedReason: 'Authenticate to enable biometric login',
-          biometricOnly: true,
-        );
-        if (authenticated) {
-          setState(() => _biometric = true);
-          await _savePref('prefs', 'biometric', true);
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text('Biometric login enabled.'),
-              backgroundColor: Color(0xFF059669),
-            ));
-          }
-        }
-      } on LocalAuthException catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('Error: ${e.toString()}'),
-            backgroundColor: const Color(0xFFDC2626),
-          ));
-        }
-      }
-    } else {
-      setState(() => _biometric = false);
-      await _savePref('prefs', 'biometric', false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Biometric login disabled.'),
-          backgroundColor: Color(0xFF6B7280),
-        ));
-      }
-    }
   }
 
   // ── Log out ───────────────────────────────────────────────────────────────
@@ -1640,24 +1586,38 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
       context: context,
       builder: (_) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Log Out?', style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text('Log Out?',
+            style: TextStyle(fontWeight: FontWeight.bold)),
         content: const Text('Are you sure you want to log out?'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel', style: TextStyle(color: Color(0xFF6B7280))),
+            child: const Text('Cancel',
+                style: TextStyle(color: Color(0xFF6B7280))),
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Log Out',
-                style: TextStyle(color: Color(0xFFDC2626), fontWeight: FontWeight.bold)),
+                style: TextStyle(
+                    color: Color(0xFFDC2626), fontWeight: FontWeight.bold)),
           ),
         ],
       ),
     );
     if (ok == true && mounted) {
-      await FirebaseAuth.instance.signOut();
-      Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
+      try {
+        await FirebaseAuth.instance.signOut();
+        if (mounted) {
+          Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Logout failed: $e'),
+            backgroundColor: const Color(0xFFDC2626),
+          ));
+        }
+      }
     }
   }
 
@@ -1670,7 +1630,8 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
       barrierDismissible: false,
       builder: (_) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Verify Password', style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text('Verify Password',
+            style: TextStyle(fontWeight: FontWeight.bold)),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1683,11 +1644,14 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
               obscureText: true,
               decoration: InputDecoration(
                 hintText: 'Password',
-                prefixIcon: const Icon(Icons.lock_outline_rounded, color: Color(0xFF7C3AED)),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                prefixIcon: const Icon(Icons.lock_outline_rounded,
+                    color: Color(0xFF7C3AED)),
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12)),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
-                  borderSide: const BorderSide(color: Color(0xFF7C3AED), width: 2),
+                  borderSide:
+                  const BorderSide(color: Color(0xFF7C3AED), width: 2),
                 ),
               ),
             ),
@@ -1696,12 +1660,14 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel', style: TextStyle(color: Color(0xFF6B7280))),
+            child: const Text('Cancel',
+                style: TextStyle(color: Color(0xFF6B7280))),
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Verify',
-                style: TextStyle(color: Color(0xFF7C3AED), fontWeight: FontWeight.bold)),
+                style: TextStyle(
+                    color: Color(0xFF7C3AED), fontWeight: FontWeight.bold)),
           ),
         ],
       ),
@@ -1711,51 +1677,92 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
 
     final password = passwordController.text.trim();
     if (password.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Password cannot be empty.'),
-        backgroundColor: Color(0xFFDC2626),
-      ));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Password cannot be empty.'),
+          backgroundColor: Color(0xFFDC2626),
+        ));
+      }
       return;
+    }
+
+    // Show loading
+    if (mounted) {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const Center(
+          child: Card(
+            child: Padding(
+              padding: EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(color: Color(0xFF7C3AED)),
+                  SizedBox(height: 16),
+                  Text('Verifying...'),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
     }
 
     try {
       final user = FirebaseAuth.instance.currentUser!;
-      final cred = EmailAuthProvider.credential(email: user.email!, password: password);
+      final cred = EmailAuthProvider.credential(
+          email: user.email!, password: password);
       await user.reauthenticateWithCredential(cred);
+
+      if (mounted) Navigator.pop(context); // dismiss loading
 
       final confirm = await showDialog<bool>(
         context: context,
         builder: (_) => AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          title: const Text('Logout All Devices?', style: TextStyle(fontWeight: FontWeight.bold)),
+          shape:
+          RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Text('Logout All Devices?',
+              style: TextStyle(fontWeight: FontWeight.bold)),
           content: const Text(
               'This will sign you out from all devices including this one. '
                   'You\'ll need to log in again.'),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel', style: TextStyle(color: Color(0xFF6B7280))),
+              child: const Text('Cancel',
+                  style: TextStyle(color: Color(0xFF6B7280))),
             ),
             TextButton(
               onPressed: () => Navigator.pop(context, true),
               child: const Text('Logout All',
-                  style: TextStyle(color: Color(0xFFDC2626), fontWeight: FontWeight.bold)),
+                  style: TextStyle(
+                      color: Color(0xFFDC2626),
+                      fontWeight: FontWeight.bold)),
             ),
           ],
         ),
       );
 
       if (confirm == true && mounted) {
-        await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+        // Bump version so other devices detect stale session
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(user.uid)
+            .set({
           'security': {
             'lastLogoutAll':    FieldValue.serverTimestamp(),
             'logoutAllVersion': FieldValue.increment(1),
           }
         }, SetOptions(merge: true));
+
         await FirebaseAuth.instance.signOut();
-        if (mounted) Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
+        if (mounted) {
+          Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
+        }
       }
     } on FirebaseAuthException catch (e) {
+      if (mounted) Navigator.pop(context); // dismiss loading
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(e.code == 'wrong-password'
@@ -1764,11 +1771,20 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
           backgroundColor: const Color(0xFFDC2626),
         ));
       }
+    } catch (e) {
+      if (mounted) Navigator.pop(context);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: const Color(0xFFDC2626),
+        ));
+      }
     }
   }
 
   // ── Clear Firestore cache ─────────────────────────────────────────────────
   Future<void> _clearCache() async {
+    if (!mounted) return;
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -1789,7 +1805,10 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
       ),
     );
     try {
+      await FirebaseFirestore.instance.terminate();
       await FirebaseFirestore.instance.clearPersistence();
+      // Re-init so Firestore works again after clearPersistence
+      await FirebaseFirestore.instance.enableNetwork();
       if (mounted) Navigator.pop(context);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -1811,7 +1830,8 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
 
   // ── Navigate to Activity → Past Services tab ──────────────────────────────
   void _goToActivityPastServices() {
-    Navigator.pushNamed(context, '/activity', arguments: {'tab': 'pastServices'});
+    Navigator.pushNamed(context, '/activity',
+        arguments: {'tab': 'pastServices'});
   }
 
   // ── Safety PIN sheet ──────────────────────────────────────────────────────
@@ -1825,47 +1845,118 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
     );
   }
 
-  // ── Active sessions screen ────────────────────────────────────────────────
-  void _viewActiveSessions() {
-    Navigator.push(
-        context, MaterialPageRoute(builder: (_) => const _ActiveSessionsScreen()));
-  }
-
-  // ── Download my data ──────────────────────────────────────────────────────
+  // ── Download my data → sends real-time request to admin ──────────────────
   Future<void> _downloadData() async {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
-    if (uid.isEmpty) return;
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-      content: Text(
-          'Preparing your data export... You\'ll receive an email within 24 hours.'),
-      backgroundColor: Color(0xFF059669),
-      duration: Duration(seconds: 4),
-    ));
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    // Show loading snackbar immediately
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Row(children: [
+          SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                  color: Colors.white, strokeWidth: 2)),
+          SizedBox(width: 12),
+          Text('Sending request...'),
+        ]),
+        backgroundColor: Color(0xFF7C3AED),
+        duration: Duration(seconds: 2),
+      ));
+    }
+
     try {
-      await FirebaseFirestore.instance.collection('data_requests').add({
-        'uid':         uid,
-        'email':       FirebaseAuth.instance.currentUser?.email ?? '',
+      // Fetch user profile for username
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .get();
+      final username =
+          userDoc.data()?['username'] as String? ?? 'Unknown User';
+      final displayName =
+          userDoc.data()?['name'] as String? ?? user.displayName ?? 'Unknown';
+      final email = user.email ?? '';
+
+      // Write to admin_requests — admin panel listens to this collection
+      await FirebaseFirestore.instance.collection('admin_requests').add({
+        'type':        'data_export',
+        'uid':         user.uid,
+        'email':       email,
+        'username':    username,
+        'displayName': displayName,
         'requestedAt': FieldValue.serverTimestamp(),
-        'type':        'export',
         'status':      'pending',
+        'message':
+        'User @$username ($email) has requested a copy of their data.',
+        'read':        false,
       });
-    } catch (_) {}
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text(
+              'Request sent to admin! You\'ll be contacted via email within 24 hours.'),
+          backgroundColor: Color(0xFF059669),
+          duration: Duration(seconds: 4),
+        ));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Failed to send request. Please try again.'),
+          backgroundColor: const Color(0xFFDC2626),
+        ));
+      }
+    }
   }
 
-  // ── Delete account ────────────────────────────────────────────────────────
+  // ── Delete account → sends request to admin instead of auto-delete ────────
   Future<void> _deleteAccount() async {
     final passwordController = TextEditingController();
 
+    // Step 1: Confirm intent
+    final wantsToDelete = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Delete Account?',
+            style: TextStyle(
+                fontWeight: FontWeight.bold, color: Color(0xFFDC2626))),
+        content: const Text(
+            'Are you sure you want to request account deletion? '
+                'You will need to verify your password and our admin team '
+                'will process your request.',
+            style: TextStyle(height: 1.5)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel',
+                style: TextStyle(color: Color(0xFF6B7280))),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Continue',
+                style: TextStyle(
+                    color: Color(0xFFDC2626), fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+    if (wantsToDelete != true || !mounted) return;
+
+    // Step 2: Verify password
     final passwordConfirmed = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
       builder: (_) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Confirm Identity', style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text('Confirm Identity',
+            style: TextStyle(fontWeight: FontWeight.bold)),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('Enter your password to proceed with account deletion.',
+            const Text('Enter your password to submit the deletion request.',
                 style: TextStyle(height: 1.4)),
             const SizedBox(height: 16),
             TextField(
@@ -1873,12 +1964,14 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
               obscureText: true,
               decoration: InputDecoration(
                 hintText: 'Password',
-                prefixIcon:
-                const Icon(Icons.lock_outline_rounded, color: Color(0xFFDC2626)),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                prefixIcon: const Icon(Icons.lock_outline_rounded,
+                    color: Color(0xFFDC2626)),
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12)),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
-                  borderSide: const BorderSide(color: Color(0xFFDC2626), width: 2),
+                  borderSide:
+                  const BorderSide(color: Color(0xFFDC2626), width: 2),
                 ),
               ),
             ),
@@ -1887,61 +1980,138 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel', style: TextStyle(color: Color(0xFF6B7280))),
+            child: const Text('Cancel',
+                style: TextStyle(color: Color(0xFF6B7280))),
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Continue',
-                style: TextStyle(color: Color(0xFFDC2626), fontWeight: FontWeight.bold)),
+            child: const Text('Submit Request',
+                style: TextStyle(
+                    color: Color(0xFFDC2626), fontWeight: FontWeight.bold)),
           ),
         ],
       ),
     );
-
     if (passwordConfirmed != true || !mounted) return;
 
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Delete Account?',
-            style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFFDC2626))),
-        content: const Text(
-            'This action is PERMANENT. All your data, bookings, and payment history '
-                'will be deleted immediately. This cannot be undone.',
-            style: TextStyle(height: 1.5)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel', style: TextStyle(color: Color(0xFF6B7280))),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Yes, Delete',
-                style: TextStyle(color: Color(0xFFDC2626), fontWeight: FontWeight.bold)),
-          ),
-        ],
-      ),
-    );
+    final password = passwordController.text.trim();
+    if (password.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Password cannot be empty.'),
+        backgroundColor: Color(0xFFDC2626),
+      ));
+      return;
+    }
 
-    if (confirm != true || !mounted) return;
+    // Show loading
+    if (mounted) {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const Center(
+          child: Card(
+            child: Padding(
+              padding: EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(color: Color(0xFFDC2626)),
+                  SizedBox(height: 16),
+                  Text('Submitting request...'),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
 
     try {
       final user = FirebaseAuth.instance.currentUser!;
+
+      // Re-authenticate to verify identity
       final cred = EmailAuthProvider.credential(
-          email: user.email!, password: passwordController.text.trim());
+          email: user.email!, password: password);
       await user.reauthenticateWithCredential(cred);
-      await FirebaseFirestore.instance.collection('users').doc(user.uid).delete();
-      await user.delete();
-      if (mounted) Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
+
+      // Fetch user profile details
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .get();
+      final username =
+          userDoc.data()?['username'] as String? ?? 'Unknown User';
+      final displayName =
+          userDoc.data()?['name'] as String? ?? user.displayName ?? 'Unknown';
+      final email = user.email ?? '';
+
+      // Send deletion request to admin — admin panel listens to this
+      await FirebaseFirestore.instance.collection('admin_requests').add({
+        'type':        'account_deletion',
+        'uid':         user.uid,
+        'email':       email,
+        'username':    username,
+        'displayName': displayName,
+        'requestedAt': FieldValue.serverTimestamp(),
+        'status':      'pending',
+        'message':
+        'User @$username (UID: ${user.uid}) has requested account deletion.',
+        'read':        false,
+      });
+
+      // Also flag the user doc so admin can see it
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .set({
+        'deletionRequested': true,
+        'deletionRequestedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      if (mounted) Navigator.pop(context); // dismiss loading
+
+      if (mounted) {
+        await showDialog(
+          context: context,
+          builder: (_) => AlertDialog(
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20)),
+            title: const Text('Request Submitted',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            content: const Text(
+                'Your account deletion request has been sent to our admin team. '
+                    'They will review it and contact you at your registered email '
+                    'within 48 hours. Your account remains active until then.',
+                style: TextStyle(height: 1.5)),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('OK',
+                    style: TextStyle(
+                        color: Color(0xFF7C3AED),
+                        fontWeight: FontWeight.bold)),
+              ),
+            ],
+          ),
+        );
+      }
     } on FirebaseAuthException catch (e) {
+      if (mounted) Navigator.pop(context); // dismiss loading
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(e.code == 'wrong-password'
               ? 'Incorrect password. Please try again.'
               : e.code == 'requires-recent-login'
               ? 'Please log out, log back in, and try again.'
-              : e.message ?? 'Error deleting account.'),
+              : e.message ?? 'Authentication failed.'),
+          backgroundColor: const Color(0xFFDC2626),
+        ));
+      }
+    } catch (e) {
+      if (mounted) Navigator.pop(context);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Failed to submit request: $e'),
           backgroundColor: const Color(0xFFDC2626),
         ));
       }
@@ -1954,7 +2124,8 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFFF4F6FB),
       body: _loadingPrefs
-          ? const Center(child: CircularProgressIndicator(color: Color(0xFF7C3AED)))
+          ? const Center(
+          child: CircularProgressIndicator(color: Color(0xFF7C3AED)))
           : CustomScrollView(
         physics: const ClampingScrollPhysics(),
         slivers: [
@@ -1977,7 +2148,8 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
               delegate: SliverChildListDelegate([
 
                 // ── 1. EMERGENCY & SAFETY ────────────────────────
-                _sectionLabel('EMERGENCY & SAFETY', Icons.emergency_rounded),
+                _sectionLabel(
+                    'EMERGENCY & SAFETY', Icons.emergency_rounded),
                 const SizedBox(height: 10),
                 _card([
                   _SettingsSwitchTile(
@@ -1987,8 +2159,11 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                     title: 'SOS Shortcut',
                     subtitle: 'Press power 3× to trigger SOS',
                     value: _sosShortcut,
-                    onChanged: (_) => _toggle('emergencySettings', 'sosShortcut',
-                        _sosShortcut, (v) => _sosShortcut = v),
+                    onChanged: (_) => _toggle(
+                        'emergencySettings',
+                        'sosShortcut',
+                        _sosShortcut,
+                            (v) => _sosShortcut = v),
                   ),
                   _SettingsTapTile(
                     icon: Icons.pin_rounded,
@@ -2004,7 +2179,8 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                 const SizedBox(height: 24),
 
                 // ── 2. NOTIFICATION CONTROLS ─────────────────────
-                _sectionLabel('NOTIFICATION CONTROLS', Icons.notifications_rounded),
+                _sectionLabel(
+                    'NOTIFICATION CONTROLS', Icons.notifications_rounded),
                 const SizedBox(height: 10),
                 _card([
                   _SettingsSwitchTile(
@@ -2061,7 +2237,8 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                     iconColor: const Color(0xFF7C3AED),
                     iconBg: const Color(0xFFEDE9FE),
                     title: 'Past Services',
-                    subtitle: 'View your service history in Activity',
+                    subtitle:
+                    'View your service history in Activity',
                     isLast: true,
                     onTap: _goToActivityPastServices,
                   ),
@@ -2073,23 +2250,6 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                 _sectionLabel('SECURITY', Icons.security_rounded),
                 const SizedBox(height: 10),
                 _card([
-                  _SettingsSwitchTile(
-                    icon: Icons.fingerprint_rounded,
-                    iconColor: const Color(0xFF0891B2),
-                    iconBg: const Color(0xFFE0F2FE),
-                    title: 'Biometric Login',
-                    subtitle: 'Fingerprint or Face ID to sign in',
-                    value: _biometric,
-                    onChanged: (_) => _toggleBiometric(),
-                  ),
-                  _SettingsTapTile(
-                    icon: Icons.devices_rounded,
-                    iconColor: const Color(0xFF059669),
-                    iconBg: const Color(0xFFD1FAE5),
-                    title: 'Active Sessions',
-                    subtitle: 'View all logged-in devices',
-                    onTap: _viewActiveSessions,
-                  ),
                   _SettingsTapTile(
                     icon: Icons.logout_rounded,
                     iconColor: const Color(0xFFDC2626),
@@ -2113,7 +2273,7 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                     iconColor: const Color(0xFF059669),
                     iconBg: const Color(0xFFD1FAE5),
                     title: 'Download My Data',
-                    subtitle: 'Get a copy of all your data',
+                    subtitle: 'Request a copy — admin will email you',
                     onTap: _downloadData,
                   ),
                   _SettingsTapTile(
@@ -2139,9 +2299,10 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                     iconBg: const Color(0xFFFEF3C7),
                     title: 'Help Center',
                     subtitle: 'Guides, tutorials & how-tos',
-                    // Uses HelpCenterScreen from profile_screen.dart
-                    onTap: () => Navigator.push(context,
-                        MaterialPageRoute(builder: (_) => const HelpCenterScreen())),
+                    onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => const HelpCenterScreen())),
                   ),
                   _SettingsTapTile(
                     icon: Icons.privacy_tip_rounded,
@@ -2149,8 +2310,11 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                     iconBg: const Color(0xFFE0F2FE),
                     title: 'Privacy Policy',
                     subtitle: 'How we handle your data',
-                    onTap: () => Navigator.push(context,
-                        MaterialPageRoute(builder: (_) => const _SettingsTermsScreen())),
+                    onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) =>
+                            const _SettingsTermsScreen())),
                   ),
                   _SettingsTapTile(
                     icon: Icons.description_rounded,
@@ -2158,8 +2322,11 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                     iconBg: const Color(0xFFD1FAE5),
                     title: 'Terms & Conditions',
                     subtitle: 'Our usage terms',
-                    onTap: () => Navigator.push(context,
-                        MaterialPageRoute(builder: (_) => const _SettingsTermsScreen())),
+                    onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) =>
+                            const _SettingsTermsScreen())),
                   ),
                   _SettingsTapTile(
                     icon: Icons.groups_rounded,
@@ -2168,9 +2335,11 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                     title: 'Community Guidelines',
                     subtitle: 'How to stay safe & respectful',
                     isLast: true,
-                    onTap: () => Navigator.push(context,
+                    onTap: () => Navigator.push(
+                        context,
                         MaterialPageRoute(
-                            builder: (_) => const _SettingsCommunityScreen())),
+                            builder: (_) =>
+                            const _SettingsCommunityScreen())),
                   ),
                 ]),
 
@@ -2179,7 +2348,7 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                 // ── DELETE ACCOUNT ───────────────────────────────
                 _redButton(
                     icon: Icons.delete_forever_rounded,
-                    label: 'Delete Account',
+                    label: 'Request Account Deletion',
                     onTap: _deleteAccount),
 
                 const SizedBox(height: 12),
@@ -2194,9 +2363,11 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                 const Center(
                   child: Column(children: [
                     Text('Trouble Sarthi',
-                        style: TextStyle(fontSize: 13, color: Color(0xFFB0B8CC))),
+                        style: TextStyle(
+                            fontSize: 13, color: Color(0xFFB0B8CC))),
                     Text('Version 2.4.1 (Indigo)',
-                        style: TextStyle(fontSize: 11, color: Color(0xFFD1D5DB))),
+                        style: TextStyle(
+                            fontSize: 11, color: Color(0xFFD1D5DB))),
                   ]),
                 ),
                 const SizedBox(height: 60),
@@ -2235,7 +2406,8 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
       ],
     ),
     child: ClipRRect(
-        borderRadius: BorderRadius.circular(18), child: Column(children: tiles)),
+        borderRadius: BorderRadius.circular(18),
+        child: Column(children: tiles)),
   );
 
   Widget _redButton(
