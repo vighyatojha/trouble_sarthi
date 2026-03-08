@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import '../service/realtime_db_service.dart';
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  TRUST & SAFETY SCREEN  —  "Your Safety is Our Priority"
 //  - No auto-popup of review sheet on load
@@ -1503,7 +1505,6 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
   bool _submitting = false;
   final Map<int, int> _answers = {};
 
-  // Optional free-text note the reviewer can add
   final TextEditingController _noteController = TextEditingController();
 
   late final AnimationController _doneAnim;
@@ -1517,16 +1518,12 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
     _doneScale = Tween<double>(begin: 0.4, end: 1.0).animate(
         CurvedAnimation(parent: _doneAnim, curve: Curves.elasticOut));
 
-    // ── DEMO MODE: pre-fill all answers and star rating so team can see
-    // the full flow without tapping through manually.
-    // Remove demoMode: true from your call site before going to production.
     if (widget.demoMode) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         final qs = widget.role == _ReviewerRole.user
             ? _userQuestions(widget.serviceName)
             : _helperQuestions(widget.serviceName);
         setState(() {
-          // Pick the first (best) option for every question
           for (var i = 0; i < qs.length; i++) {
             _answers[i] = 0;
           }
@@ -1581,6 +1578,40 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
           .collection(isUserRole ? 'user_to_helper' : 'helper_to_user')
           .add(reviewData);
 
+      await FirebaseFirestore.instance.collection('reviewHistory').add({
+        'userId':      isUserRole
+            ? FirebaseAuth.instance.currentUser?.uid ?? ''
+            : widget.revieweeId,
+        'helperId':    isUserRole
+            ? widget.revieweeId
+            : FirebaseAuth.instance.currentUser?.uid ?? '',
+        'helperName':  isUserRole ? widget.revieweeName : '',
+        'bookingId':   widget.bookingId,
+        'serviceName': widget.serviceName,
+        'rating':      _starRating,
+        'answers':     _answers.map(
+                (k, v) => MapEntry(_questions[k].question, _questions[k].options[v])),
+        'role':        isUserRole ? 'user' : 'helper',
+        'createdAt':   FieldValue.serverTimestamp(),
+      });
+
+      // ── Mark booking completed in Firestore ───────────────────────────
+      if (isUserRole) {
+        final snap = await FirebaseFirestore.instance
+            .collection('bookings')
+            .where('bookingCode', isEqualTo: widget.bookingId)
+            .where('userId', isEqualTo: FirebaseAuth.instance.currentUser?.uid)
+            .limit(1)
+            .get();
+        if (snap.docs.isNotEmpty) {
+          await snap.docs.first.reference.update({
+            'status':      'completed',
+            'completedAt': FieldValue.serverTimestamp(),
+          });
+        }
+      }
+
+      // ── Update avg rating on helper/user doc ──────────────────────────
       final targetCollection = isUserRole ? 'helpers' : 'users';
       final targetDoc = FirebaseFirestore.instance
           .collection(targetCollection)
@@ -1595,7 +1626,7 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
           targetDoc,
           {
             'totalRatingSum': prev + _starRating,
-            'reviewCount': count + 1,
+            'reviewCount':    count + 1,
             'avgRating':
             ((prev + _starRating) / (count + 1)).toStringAsFixed(1),
             'lastReviewedAt': FieldValue.serverTimestamp(),
@@ -1604,14 +1635,33 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
         );
       });
 
+      // ── Auto-flag low-rated users ─────────────────────────────────────
       if (!isUserRole && _starRating <= 2) {
         await FirebaseFirestore.instance
             .collection('users')
             .doc(widget.revieweeId)
             .set({
-          'flagCount': FieldValue.increment(1),
+          'flagCount':     FieldValue.increment(1),
           'lastFlaggedAt': FieldValue.serverTimestamp(),
         }, SetOptions(merge: true));
+      }
+
+      // ── FIXED: Firestore notification (was RTDB — now visible in tab) ──
+      if (isUserRole) {
+        final currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
+        await FirebaseFirestore.instance
+            .collection('notifications')
+            .doc(currentUid)
+            .collection('items')
+            .add({
+          'type':      'service_completed',
+          'title':     'Service Completed',
+          'body':      'How was your experience with ${widget.serviceName}? Tap to rate.',
+          'bookingId': widget.bookingId,
+          'rating':    0,
+          'read':      false,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
       }
 
       setState(() {
@@ -1619,6 +1669,7 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
         _submitting = false;
       });
       _doneAnim.forward();
+
     } catch (e) {
       setState(() => _submitting = false);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1646,7 +1697,14 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
           role: widget.role,
           revieweeName: widget.revieweeName,
           anim: _doneScale,
-          onClose: () => Navigator.pop(context),
+          onClose: () async {
+            if (widget.role == _ReviewerRole.user) {
+              final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+              final chatId = '${uid}_${widget.revieweeId}';
+              await RealtimeDbService.instance.deleteChat(chatId);
+            }
+            if (context.mounted) Navigator.pop(context);
+          },
         )
             : _step == 1
             ? _RatingView(

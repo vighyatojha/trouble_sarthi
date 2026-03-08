@@ -1,6 +1,8 @@
 // ignore_for_file: use_build_context_synchronously
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import '../service/realtime_db_service.dart';
+import '../screens/chat_screen.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -262,7 +264,20 @@ class _ConversationTile extends StatelessWidget {
 
     return GestureDetector(
       onTap: () {
-        // TODO: push ChatScreen(chatId: doc.id)
+        final data = doc.data() as Map<String, dynamic>;
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ChatScreen(
+              chatId:      doc.id,
+              helperName:  data['otherName']   as String? ?? 'Helper',
+              helperId:    data['helperId']    as String? ?? '',
+              helperPhoto: data['helperPhoto'] as String?,
+              bookingId:   data['bookingId']   as String?,
+              serviceName: data['serviceName'] as String?,
+            ),
+          ),
+        );
       },
       behavior: HitTestBehavior.opaque,
       child: Padding(
@@ -440,10 +455,9 @@ class _NotificationsTabState extends State<_NotificationsTab> {
         }
 
         final docs = snap.data?.docs ?? [];
-
-        // Update global unread badge count
         final unreadCount =
             docs.where((d) => (d.data() as Map)['read'] != true).length;
+
         WidgetsBinding.instance.addPostFrameCallback((_) {
           NotificationCountNotifier.instance.value = unreadCount;
         });
@@ -456,14 +470,13 @@ class _NotificationsTabState extends State<_NotificationsTab> {
           );
         }
 
-        // Group: today / yesterday / earlier
         final now = DateTime.now();
         final todayStart = DateTime(now.year, now.month, now.day);
         final yesterdayStart = todayStart.subtract(const Duration(days: 1));
 
-        final today = <QueryDocumentSnapshot>[];
+        final today     = <QueryDocumentSnapshot>[];
         final yesterday = <QueryDocumentSnapshot>[];
-        final earlier = <QueryDocumentSnapshot>[];
+        final earlier   = <QueryDocumentSnapshot>[];
 
         for (final doc in docs) {
           final ts =
@@ -482,7 +495,6 @@ class _NotificationsTabState extends State<_NotificationsTab> {
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 130),
           children: [
-            // Mark all as read
             if (unreadCount > 0)
               Align(
                 alignment: Alignment.centerRight,
@@ -1106,7 +1118,26 @@ Future<void> sendBookingConfirmedNotification({
       .add({
     'type': 'booking_confirmed',
     'title': 'Booking Confirmed',
-    'body': 'Your request for "$serviceName" has been accepted by $helperName.',
+    'body': 'Your request for "$serviceName" has been confirmed. Helper: $helperName.',
+    'bookingId': bookingId,
+    'read': false,
+    'createdAt': FieldValue.serverTimestamp(),
+  });
+}
+
+Future<void> sendBookingCancelledNotification({
+  required String userId,
+  required String serviceName,
+  required String bookingId,
+}) async {
+  await FirebaseFirestore.instance
+      .collection('notifications')
+      .doc(userId)
+      .collection('items')
+      .add({
+    'type': 'booking_cancelled',
+    'title': 'Booking Cancelled',
+    'body': 'Your booking for "$serviceName" (#$bookingId) has been cancelled.',
     'bookingId': bookingId,
     'read': false,
     'createdAt': FieldValue.serverTimestamp(),
