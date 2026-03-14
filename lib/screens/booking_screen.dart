@@ -630,7 +630,8 @@ final List<BookingModel> _demoBookings = [
 // ─────────────────────────────────────────────────────────────────────────────
 
 class BookingsScreen extends StatefulWidget {
-  const BookingsScreen({super.key});
+  final String? openBookingId; // ← NEW: auto-opens booking detail on load
+  const BookingsScreen({super.key, this.openBookingId});
 
   @override
   State<BookingsScreen> createState() => _BookingsScreenState();
@@ -649,6 +650,43 @@ class _BookingsScreenState extends State<BookingsScreen>
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
     _initConnectivity();
+
+    // ── Auto-open booking detail if navigated from a notification ──
+    if (widget.openBookingId != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _autoOpenBooking(widget.openBookingId!);
+      });
+    }
+  }
+
+  // ── Fetches the booking by bookingCode and opens its detail sheet ──
+  Future<void> _autoOpenBooking(String bookingCode) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null || !mounted) return;
+
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('bookings')
+          .where('bookingCode', isEqualTo: bookingCode)
+          .where('userId', isEqualTo: uid)
+          .limit(1)
+          .get();
+
+      if (snap.docs.isEmpty || !mounted) return;
+
+      final booking = BookingModel.fromFirestore(
+        snap.docs.first.data(),
+        snap.docs.first.id,
+      );
+
+      // Small delay so the screen finishes building first
+      await Future.delayed(const Duration(milliseconds: 300));
+      if (!mounted) return;
+
+      _openDetails(context, booking);
+    } catch (e) {
+      debugPrint('[BookingsScreen] _autoOpenBooking error: $e');
+    }
   }
 
   Future<void> _initConnectivity() async {
@@ -657,12 +695,11 @@ class _BookingsScreenState extends State<BookingsScreen>
       setState(() =>
       _hasInternet = results.any((r) => r != ConnectivityResult.none));
     }
-    _connectivitySub =
-        Connectivity().onConnectivityChanged.listen((results) {
-          if (!mounted) return;
-          setState(() =>
-          _hasInternet = results.any((r) => r != ConnectivityResult.none));
-        });
+    _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
+      if (!mounted) return;
+      setState(() =>
+      _hasInternet = results.any((r) => r != ConnectivityResult.none));
+    });
   }
 
   @override
@@ -695,7 +732,7 @@ class _BookingsScreenState extends State<BookingsScreen>
                   : StreamBuilder<List<BookingModel>>(
                 stream: BookingService.bookingsStream(),
                 builder: (context, snap) {
-                  // Loading
+                  // Loading skeleton
                   if (snap.connectionState == ConnectionState.waiting) {
                     return TabBarView(
                       controller: _tabController,
@@ -708,8 +745,10 @@ class _BookingsScreenState extends State<BookingsScreen>
                   }
 
                   final realBookings = snap.data ?? [];
-                  // Show demos when no real data
-                  final all = realBookings.isEmpty ? _demoBookings : realBookings;
+                  // Show demos when no real data exists
+                  final all = realBookings.isEmpty
+                      ? _demoBookings
+                      : realBookings;
 
                   final current = all
                       .where((b) =>
@@ -717,10 +756,12 @@ class _BookingsScreenState extends State<BookingsScreen>
                       b.status == BookingStatus.pending)
                       .toList();
                   final completed = all
-                      .where((b) => b.status == BookingStatus.completed)
+                      .where(
+                          (b) => b.status == BookingStatus.completed)
                       .toList();
                   final cancelled = all
-                      .where((b) => b.status == BookingStatus.cancelled)
+                      .where(
+                          (b) => b.status == BookingStatus.cancelled)
                       .toList();
 
                   return TabBarView(

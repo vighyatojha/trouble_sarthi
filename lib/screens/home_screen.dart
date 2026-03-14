@@ -16,6 +16,8 @@ import 'location_picker_screen.dart';
 import 'helper_list_screen.dart';
 import 'midnight_emergency_screen.dart';
 import 'home_skeleton.dart'; // ← your skeleton file
+import '../service/notification_service.dart';
+import '../screens/booking_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // COLOR HELPERS
@@ -262,6 +264,33 @@ class _HomeScreenState extends State<HomeScreen> {
     const ProfileScreen(),
   ];
 
+  @override
+  void initState() {
+    super.initState();
+    // Listen for notification taps → auto-navigate to booking detail
+    NotificationNavNotifier.instance.addListener(_onNotificationNav);
+  }
+
+  // Called whenever a notification banner is tapped (foreground or background)
+  void _onNotificationNav() {
+    final bookingId = NotificationNavNotifier.instance.value;
+    if (bookingId == null || !mounted) return;
+    NotificationNavNotifier.instance.value = null; // reset so it doesn't re-fire
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => BookingsScreen(openBookingId: bookingId),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    NotificationNavNotifier.instance.removeListener(_onNotificationNav);
+    super.dispose();
+  }
+
   void _onNavTap(int i) {
     if (_selectedIndex == i) return;
     setState(() => _selectedIndex = i);
@@ -283,7 +312,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // FLOATING PILL BOTTOM NAV
 // ─────────────────────────────────────────────────────────────────────────────
@@ -364,6 +392,11 @@ class _FloatingBottomNav extends StatelessWidget {
 // NAV ITEMS
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DROP-IN REPLACEMENT for _NavItem, _MessageNavItem, _BookingNavItem
+// in home_screen.dart  (replaces the three classes only — nothing else changes)
+// ─────────────────────────────────────────────────────────────────────────────
+
 class _NavItem extends StatelessWidget {
   final IconData icon, activeIcon;
   final String label;
@@ -384,6 +417,8 @@ class _NavItem extends StatelessWidget {
     final active = idx == sel;
     const activeColor = Color(0xFF7C3AED);
     const inactiveColor = Color(0xFFB0B8C8);
+    final color = active ? activeColor : inactiveColor;
+
     return Expanded(
       child: GestureDetector(
         onTap: () => onTap(idx),
@@ -391,29 +426,30 @@ class _NavItem extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            // ── Animated pill indicator ───────────────────────────────
             AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
+              duration: const Duration(milliseconds: 220),
               curve: Curves.easeOutCubic,
-              padding:
-              const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              width: active ? 40 : 0,
+              height: active ? 32 : 0,
               decoration: BoxDecoration(
                 color: active
                     ? const Color(0xFFEDE9FE)
                     : Colors.transparent,
-                borderRadius: BorderRadius.circular(20),
+                borderRadius: BorderRadius.circular(12),
               ),
-              child: Icon(
-                active ? activeIcon : icon,
-                color: active ? activeColor : inactiveColor,
-                size: 21,
-              ),
+              child: active
+                  ? Icon(activeIcon, size: 20, color: activeColor)
+                  : const SizedBox.shrink(),
             ),
+            // ── Inactive icon (visible only when not selected) ────────
+            if (!active) Icon(icon, size: 20, color: inactiveColor),
             const SizedBox(height: 2),
             AnimatedDefaultTextStyle(
               duration: const Duration(milliseconds: 200),
               style: TextStyle(
                 fontSize: 9,
-                color: active ? activeColor : inactiveColor,
+                color: color,
                 fontWeight: active ? FontWeight.w700 : FontWeight.w500,
               ),
               child: Text(label),
@@ -435,6 +471,8 @@ class _MessageNavItem extends StatelessWidget {
     final active = sel == 1;
     const activeColor = Color(0xFF7C3AED);
     const inactiveColor = Color(0xFFB0B8C8);
+    final color = active ? activeColor : inactiveColor;
+
     return Expanded(
       child: GestureDetector(
         onTap: () => onTap(1),
@@ -447,39 +485,46 @@ class _MessageNavItem extends StatelessWidget {
               builder: (_, count, __) => Stack(
                 clipBehavior: Clip.none,
                 children: [
+                  // ── Animated pill ──────────────────────────────────
                   AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
+                    duration: const Duration(milliseconds: 220),
                     curve: Curves.easeOutCubic,
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 4),
+                    width: active ? 40 : 0,
+                    height: active ? 32 : 0,
                     decoration: BoxDecoration(
                       color: active
                           ? const Color(0xFFEDE9FE)
                           : Colors.transparent,
-                      borderRadius: BorderRadius.circular(20),
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    child: Icon(
-                      active
-                          ? Icons.chat_bubble_rounded
-                          : Icons.chat_bubble_outline_rounded,
-                      color: active ? activeColor : inactiveColor,
-                      size: 21,
-                    ),
+                    child: active
+                        ? const Icon(Icons.chat_bubble_rounded,
+                        size: 20, color: activeColor)
+                        : const SizedBox.shrink(),
                   ),
-                  if (count > 0)
-                    Positioned(
-                      top: 0,
-                      right: 6,
-                      child: Container(
-                        width: 8,
-                        height: 8,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFDC2626),
-                          shape: BoxShape.circle,
-                          border:
-                          Border.all(color: Colors.white, width: 1.5),
-                        ),
-                      ),
+                  // ── Inactive icon + badge ──────────────────────────
+                  if (!active)
+                    Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        Icon(Icons.chat_bubble_outline_rounded,
+                            size: 20, color: inactiveColor),
+                        if (count > 0)
+                          Positioned(
+                            top: -2,
+                            right: -2,
+                            child: Container(
+                              width: 8,
+                              height: 8,
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFDC2626),
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                    color: Colors.white, width: 1.5),
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                 ],
               ),
@@ -489,7 +534,7 @@ class _MessageNavItem extends StatelessWidget {
               duration: const Duration(milliseconds: 200),
               style: TextStyle(
                 fontSize: 9,
-                color: active ? activeColor : inactiveColor,
+                color: color,
                 fontWeight: active ? FontWeight.w700 : FontWeight.w500,
               ),
               child: const Text('Messages'),
@@ -510,6 +555,7 @@ class _BookingNavItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final active = idx == sel;
+
     return Expanded(
       child: GestureDetector(
         onTap: () => onTap(idx),
@@ -517,11 +563,12 @@ class _BookingNavItem extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            // ── Keeps its distinctive gradient circle, adds scale anim ──
             AnimatedContainer(
               duration: const Duration(milliseconds: 220),
               curve: Curves.easeOutCubic,
-              width: 42,
-              height: 42,
+              width: active ? 42 : 36,
+              height: active ? 42 : 36,
               decoration: BoxDecoration(
                 gradient: active
                     ? const LinearGradient(
@@ -551,19 +598,13 @@ class _BookingNavItem extends StatelessWidget {
                     blurRadius: 12,
                     offset: const Offset(0, 3),
                   ),
-                  BoxShadow(
-                    color:
-                    const Color(0xFFEC4899).withOpacity(0.20),
-                    blurRadius: 8,
-                    offset: const Offset(0, 2),
-                  ),
                 ]
                     : null,
               ),
               child: Icon(
                 Icons.calendar_today_rounded,
-                color: active ? Colors.white : Colors.white.withOpacity(0.9),
-                size: 19,
+                color: Colors.white.withOpacity(active ? 1.0 : 0.9),
+                size: active ? 19 : 17,
               ),
             ),
             const SizedBox(height: 2),

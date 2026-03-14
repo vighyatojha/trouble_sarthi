@@ -146,7 +146,8 @@ class _SplashScreenState extends State<SplashScreen>
               const SizedBox(height: 32),
               Text(
                 'Trouble Sarthi',
-                style: GoogleFonts.poppins(
+                style: const TextStyle(
+                  fontFamily: 'Saman',
                   fontSize: 34,
                   fontWeight: FontWeight.bold,
                   color: Colors.white,
