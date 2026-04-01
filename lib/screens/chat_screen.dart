@@ -1,6 +1,7 @@
 // lib/screens/chat_screen.dart
 // ignore_for_file: use_build_context_synchronously
 
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -22,6 +23,7 @@ class ChatScreen extends StatefulWidget {
   final String? helperIntro;
   final String? helperRating;
   final String? helperJobCount;
+  final String? bookingStatus;
 
   const ChatScreen({
     super.key,
@@ -34,6 +36,7 @@ class ChatScreen extends StatefulWidget {
     this.helperIntro,
     this.helperRating,
     this.helperJobCount,
+    this.bookingStatus,
   });
 
   @override
@@ -42,22 +45,48 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen>
     with SingleTickerProviderStateMixin {
-  final _msgCtrl = TextEditingController();
+  final _msgCtrl    = TextEditingController();
   final _scrollCtrl = ScrollController();
-  bool _isSending = false;
+
+  // ── Reactive completed flag ───────────────────────────────────────────────
+  bool _isCompleted = false;
+  StreamSubscription? _statusSub;
+
+  bool _isSending       = false;
   bool _showHelperIntro = false;
 
   late final AnimationController _introAnim;
-  late final Animation<double> _introSlide;
-  late final Animation<double> _introFade;
+  late final Animation<double>   _introSlide;
+  late final Animation<double>   _introFade;
 
-  String get _uid => FirebaseAuth.instance.currentUser?.uid ?? '';
-  String get _userName =>
-      FirebaseAuth.instance.currentUser?.displayName ?? 'User';
+  String get _uid      => FirebaseAuth.instance.currentUser?.uid ?? '';
+  String get _userName => FirebaseAuth.instance.currentUser?.displayName ?? 'User';
 
   @override
   void initState() {
     super.initState();
+
+    // ── Seed from the param passed in (instant, no flicker) ──────────────
+    _isCompleted =
+        widget.bookingStatus == 'completed' ||
+            widget.bookingStatus == 'cancelled';
+
+    // ── React to Firestore changes so the banner appears the moment the
+    //    booking is marked completed, even while the chat is open ──────────
+    _statusSub = FirebaseFirestore.instance
+        .collection('chats')
+        .doc(widget.chatId)
+        .snapshots()
+        .listen((snap) {
+      final status = snap.data()?['bookingStatus'] as String? ?? 'active';
+      if (mounted) {
+        setState(() {
+          _isCompleted =
+              status == 'completed' || status == 'cancelled';
+        });
+      }
+    });
+
     _introAnim = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 320),
@@ -72,6 +101,7 @@ class _ChatScreenState extends State<ChatScreen>
 
   @override
   void dispose() {
+    _statusSub?.cancel();
     _msgCtrl.dispose();
     _scrollCtrl.dispose();
     _introAnim.dispose();
@@ -106,65 +136,89 @@ class _ChatScreenState extends State<ChatScreen>
     _msgCtrl.clear();
 
     await RealtimeDbService.instance.sendMessage(
-      chatId: widget.chatId,
-      senderId: _uid,
+      chatId:     widget.chatId,
+      senderId:   _uid,
       senderName: _userName,
-      text: text,
+      text:       text,
     );
 
     await RealtimeDbService.instance.notifyHelperMessage(
-      userId: widget.helperId,
-      helperName: _userName,
+      userId:         widget.helperId,
+      helperName:     _userName,
       messagePreview: text,
-      bookingId: widget.bookingId,
+      bookingId:      widget.bookingId,
     );
 
     setState(() => _isSending = false);
     _scrollToBottom();
   }
 
+  // ── Two-step seva completion ──────────────────────────────────────────────
   Future<void> _onSevaCompleted() async {
+    // Step 1 — confirmation dialog
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        shape:
-        RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        title: const Text('Confirm Seva Completed?',
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        title: const Text('Service completed?',
             style: TextStyle(fontWeight: FontWeight.bold)),
         content: Text(
-          'Please confirm that "${widget.serviceName ?? 'the service'}" has been completed.',
-          style: const TextStyle(color: Color(0xFF6B7280)),
+          'Please confirm that "${widget.serviceName ?? "the service"}" '
+              'has been fully completed before rating.',
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Not Yet',
+            child: const Text('Not yet',
                 style: TextStyle(color: Color(0xFF6B7280))),
           ),
           ElevatedButton(
             onPressed: () => Navigator.pop(context, true),
             style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF7C3AED),
+              backgroundColor: const Color(0xFF059669),
               elevation: 0,
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12)),
             ),
-            child: const Text('Yes, Proceed',
+            child: const Text('Yes, it is done',
                 style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
     );
 
-    if (confirmed == true && mounted) {
-      MutualReviewSheet.showForUser(
-        context,
-        bookingId: widget.bookingId ?? '',
-        helperId: widget.helperId,
-        helperName: widget.helperName,
-        serviceName: widget.serviceName ?? '',
-      );
+    if (confirmed != true || !mounted) return;
+
+    // Step 2 — update /bookings doc
+    final snap = await FirebaseFirestore.instance
+        .collection('bookings')
+        .where('bookingCode', isEqualTo: widget.bookingId ?? '')
+        .where('userId', isEqualTo: _uid)
+        .limit(1)
+        .get();
+
+    if (snap.docs.isNotEmpty) {
+      await snap.docs.first.reference.update({
+        'status':      'completed',
+        'completedAt': FieldValue.serverTimestamp(),
+      });
     }
+
+    // Step 3 — update /chats/{chatId} so the stream above fires instantly
+    await FirebaseFirestore.instance
+        .collection('chats')
+        .doc(widget.chatId)
+        .update({'bookingStatus': 'completed'});
+
+    // Step 4 — show the review sheet
+    if (!mounted) return;
+    MutualReviewSheet.showForUser(
+      context,
+      bookingId:   widget.bookingId ?? '',
+      helperId:    widget.helperId,
+      helperName:  widget.helperName,
+      serviceName: widget.serviceName ?? '',
+    );
   }
 
   void _showOptionsMenu() {
@@ -173,10 +227,10 @@ class _ChatScreenState extends State<ChatScreen>
       backgroundColor: Colors.transparent,
       builder: (_) => _ChatOptionsSheet(
         helperName: widget.helperName,
-        helperId: widget.helperId,
-        bookingId: widget.bookingId ?? '',
-        chatId: widget.chatId,
-        uid: _uid,
+        helperId:   widget.helperId,
+        bookingId:  widget.bookingId ?? '',
+        chatId:     widget.chatId,
+        uid:        _uid,
       ),
     );
   }
@@ -187,19 +241,18 @@ class _ChatScreenState extends State<ChatScreen>
       value: SystemUiOverlayStyle.light,
       child: Scaffold(
         backgroundColor: const Color(0xFFF4F6FB),
-        // ── KEY: prevents keyboard from cropping chat ──────────────────
         resizeToAvoidBottomInset: true,
         body: Column(
           children: [
             // ── Header ──────────────────────────────────────────────────
             _ChatHeader(
-              helperName: widget.helperName,
-              helperPhoto: widget.helperPhoto,
-              onBackTap: () => Navigator.pop(context),
+              helperName:   widget.helperName,
+              helperPhoto:  widget.helperPhoto,
+              onBackTap:    () => Navigator.pop(context),
               onProfileTap: _toggleHelperIntro,
               onOptionsTap: _showOptionsMenu,
-              onSevaTap: _onSevaCompleted,
-              serviceName: widget.serviceName,
+              onSevaTap:    _onSevaCompleted,
+              serviceName:  widget.serviceName,
             ),
 
             // ── Helper Intro Slide-down ──────────────────────────────────
@@ -208,18 +261,15 @@ class _ChatScreenState extends State<ChatScreen>
               builder: (_, child) => ClipRect(
                 child: Align(
                   heightFactor: _introAnim.value,
-                  child: FadeTransition(
-                    opacity: _introFade,
-                    child: child,
-                  ),
+                  child: FadeTransition(opacity: _introFade, child: child),
                 ),
               ),
               child: _HelperIntroCard(
-                helperName: widget.helperName,
+                helperName:  widget.helperName,
                 helperPhoto: widget.helperPhoto,
                 intro: widget.helperIntro ??
                     'Verified Sarthi • ${widget.helperJobCount ?? '50'}+ jobs completed',
-                rating: widget.helperRating ?? '4.8',
+                rating:   widget.helperRating   ?? '4.8',
                 jobCount: widget.helperJobCount ?? '50',
               ),
             ),
@@ -229,8 +279,7 @@ class _ChatScreenState extends State<ChatScreen>
               child: GestureDetector(
                 onTap: () => FocusScope.of(context).unfocus(),
                 child: StreamBuilder<List<Map<String, dynamic>>>(
-                  stream: RealtimeDbService.instance
-                      .messagesStream(widget.chatId),
+                  stream: RealtimeDbService.instance.messagesStream(widget.chatId),
                   builder: (context, snap) {
                     if (snap.connectionState == ConnectionState.waiting) {
                       return const Center(
@@ -242,8 +291,7 @@ class _ChatScreenState extends State<ChatScreen>
                     final messages = snap.data ?? [];
 
                     if (messages.isEmpty) {
-                      return _EmptyChatState(
-                          helperName: widget.helperName);
+                      return _EmptyChatState(helperName: widget.helperName);
                     }
 
                     WidgetsBinding.instance
@@ -254,36 +302,30 @@ class _ChatScreenState extends State<ChatScreen>
                       padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
                       itemCount: messages.length,
                       itemBuilder: (_, i) {
-                        final msg = messages[i];
+                        final msg  = messages[i];
                         final isMe = msg['senderId'] == _uid;
-                        final type =
-                            msg['type'] as String? ?? 'text';
+                        final type = msg['type'] as String? ?? 'text';
 
-                        if (type == 'booking_confirmed' ||
-                            type == 'system') {
-                          return _SystemMessage(
-                              text: msg['text'] ?? '');
+                        if (type == 'booking_confirmed' || type == 'system') {
+                          return _SystemMessage(text: msg['text'] ?? '');
                         }
 
-                        // Date separator
                         final showDate = i == 0 ||
                             _isDifferentDay(
                               (messages[i - 1]['timestamp'] as int?) ?? 0,
-                              (msg['timestamp'] as int?) ?? 0,
+                              (msg['timestamp']             as int?) ?? 0,
                             );
 
                         return Column(
                           children: [
                             if (showDate)
                               _DateSeparator(
-                                  timestamp:
-                                  (msg['timestamp'] as int?) ?? 0),
+                                  timestamp: (msg['timestamp'] as int?) ?? 0),
                             _MessageBubble(
-                              text: msg['text'] ?? '',
-                              isMe: isMe,
+                              text:       msg['text']       ?? '',
+                              isMe:       isMe,
                               senderName: msg['senderName'] ?? '',
-                              timestamp:
-                              (msg['timestamp'] as int?) ?? 0,
+                              timestamp:  (msg['timestamp'] as int?) ?? 0,
                             ),
                           ],
                         );
@@ -294,11 +336,33 @@ class _ChatScreenState extends State<ChatScreen>
               ),
             ),
 
-            // ── Input Bar ─────────────────────────────────────────────────
-            _ChatInputBar(
+            // ── Input Bar / Closed Banner ─────────────────────────────────
+            _isCompleted
+                ? Container(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 20, vertical: 16),
+              color: const Color(0xFFF0FDF4),
+              child: Row(
+                children: [
+                  const Icon(Icons.check_circle_rounded,
+                      color: Color(0xFF059669), size: 20),
+                  const SizedBox(width: 10),
+                  const Expanded(
+                    child: Text(
+                      'Service completed — chat is now closed.',
+                      style: TextStyle(
+                          fontSize: 13,
+                          color: Color(0xFF065F46),
+                          fontWeight: FontWeight.w500),
+                    ),
+                  ),
+                ],
+              ),
+            )
+                : _ChatInputBar(
               controller: _msgCtrl,
-              isSending: _isSending,
-              onSend: _sendMessage,
+              isSending:  _isSending,
+              onSend:     _sendMessage,
             ),
           ],
         ),
@@ -309,9 +373,7 @@ class _ChatScreenState extends State<ChatScreen>
   bool _isDifferentDay(int ts1, int ts2) {
     final d1 = DateTime.fromMillisecondsSinceEpoch(ts1);
     final d2 = DateTime.fromMillisecondsSinceEpoch(ts2);
-    return d1.day != d2.day ||
-        d1.month != d2.month ||
-        d1.year != d2.year;
+    return d1.day != d2.day || d1.month != d2.month || d1.year != d2.year;
   }
 }
 
@@ -340,8 +402,7 @@ class _ChatHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final initial =
-    helperName.isNotEmpty ? helperName[0].toUpperCase() : 'H';
+    final initial = helperName.isNotEmpty ? helperName[0].toUpperCase() : 'H';
 
     return Container(
       decoration: const BoxDecoration(
@@ -379,10 +440,8 @@ class _ChatHeader extends StatelessWidget {
                           colors: [Color(0xFFA78BFA), Color(0xFF7C3AED)],
                         ),
                         border: Border.all(
-                            color: Colors.white.withOpacity(0.3),
-                            width: 2),
-                        image: (helperPhoto != null &&
-                            helperPhoto!.isNotEmpty)
+                            color: Colors.white.withOpacity(0.3), width: 2),
+                        image: (helperPhoto != null && helperPhoto!.isNotEmpty)
                             ? DecorationImage(
                             image: NetworkImage(helperPhoto!),
                             fit: BoxFit.cover)
@@ -397,7 +456,6 @@ class _ChatHeader extends StatelessWidget {
                                   fontSize: 17)))
                           : null,
                     ),
-                    // Online dot
                     Positioned(
                       right: 0,
                       bottom: 0,
@@ -448,8 +506,8 @@ class _ChatHeader extends StatelessWidget {
               GestureDetector(
                 onTap: onSevaTap,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 10, vertical: 7),
+                  padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
                   decoration: BoxDecoration(
                     color: const Color(0xFF059669),
                     borderRadius: BorderRadius.circular(18),
@@ -515,8 +573,7 @@ class _HelperIntroCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final initial =
-    helperName.isNotEmpty ? helperName[0].toUpperCase() : 'H';
+    final initial = helperName.isNotEmpty ? helperName[0].toUpperCase() : 'H';
 
     return Container(
       width: double.infinity,
@@ -533,7 +590,6 @@ class _HelperIntroCard extends StatelessWidget {
       ),
       child: Row(
         children: [
-          // Avatar
           Container(
             width: 54,
             height: 54,
@@ -546,8 +602,7 @@ class _HelperIntroCard extends StatelessWidget {
                   color: Colors.white.withOpacity(0.25), width: 2),
               image: (helperPhoto != null && helperPhoto!.isNotEmpty)
                   ? DecorationImage(
-                  image: NetworkImage(helperPhoto!),
-                  fit: BoxFit.cover)
+                  image: NetworkImage(helperPhoto!), fit: BoxFit.cover)
                   : null,
             ),
             child: (helperPhoto == null || helperPhoto!.isEmpty)
@@ -560,7 +615,6 @@ class _HelperIntroCard extends StatelessWidget {
                 : null,
           ),
           const SizedBox(width: 14),
-          // Info
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -580,7 +634,6 @@ class _HelperIntroCard extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 12),
-          // Stats
           Column(
             children: [
               Row(children: [
@@ -596,8 +649,7 @@ class _HelperIntroCard extends StatelessWidget {
               const SizedBox(height: 4),
               Text('$jobCount+ jobs',
                   style: TextStyle(
-                      color: Colors.white.withOpacity(0.6),
-                      fontSize: 10)),
+                      color: Colors.white.withOpacity(0.6), fontSize: 10)),
             ],
           ),
         ],
@@ -636,7 +688,6 @@ class _ChatOptionsSheet extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Handle
           Center(
             child: Container(
               width: 40,
@@ -657,39 +708,35 @@ class _ChatOptionsSheet extends StatelessWidget {
           ),
           const SizedBox(height: 16),
 
-          // View Booking Details
           _OptionTile(
-            icon: Icons.receipt_long_rounded,
+            icon:      Icons.receipt_long_rounded,
             iconColor: const Color(0xFF7C3AED),
-            iconBg: const Color(0xFFEDE9FE),
-            title: 'View Booking Details',
-            subtitle: 'See your booking info',
+            iconBg:    const Color(0xFFEDE9FE),
+            title:     'View Booking Details',
+            subtitle:  'See your booking info',
             onTap: () {
               Navigator.pop(context);
-              // Navigate to booking details — wire as needed
             },
           ),
 
-          // Clear Chat
           _OptionTile(
-            icon: Icons.cleaning_services_rounded,
+            icon:      Icons.cleaning_services_rounded,
             iconColor: const Color(0xFF0891B2),
-            iconBg: const Color(0xFFE0F2FE),
-            title: 'Clear Chat',
-            subtitle: 'Remove all messages locally',
+            iconBg:    const Color(0xFFE0F2FE),
+            title:     'Clear Chat',
+            subtitle:  'Remove all messages locally',
             onTap: () {
               Navigator.pop(context);
               _showClearChatConfirm(context);
             },
           ),
 
-          // Block Helper
           _OptionTile(
-            icon: Icons.block_rounded,
+            icon:      Icons.block_rounded,
             iconColor: const Color(0xFFD97706),
-            iconBg: const Color(0xFFFEF3C7),
-            title: 'Block Helper',
-            subtitle: 'Stop receiving messages',
+            iconBg:    const Color(0xFFFEF3C7),
+            title:     'Block Helper',
+            subtitle:  'Stop receiving messages',
             onTap: () {
               Navigator.pop(context);
               _blockHelper(context);
@@ -701,13 +748,12 @@ class _ChatOptionsSheet extends StatelessWidget {
             child: Divider(color: Color(0xFFF3F4F6)),
           ),
 
-          // Report
           _OptionTile(
-            icon: Icons.flag_rounded,
+            icon:      Icons.flag_rounded,
             iconColor: const Color(0xFFDC2626),
-            iconBg: const Color(0xFFFEE2E2),
-            title: 'Report',
-            subtitle: 'Report inappropriate behavior',
+            iconBg:    const Color(0xFFFEE2E2),
+            title:     'Report',
+            subtitle:  'Report inappropriate behavior',
             onTap: () {
               Navigator.pop(context);
               _showReportSheet(context);
@@ -739,8 +785,8 @@ class _ChatOptionsSheet extends StatelessWidget {
             },
             style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF0891B2), elevation: 0),
-            child: const Text('Clear',
-                style: TextStyle(color: Colors.white)),
+            child:
+            const Text('Clear', style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
@@ -754,8 +800,8 @@ class _ChatOptionsSheet extends StatelessWidget {
         .collection('blocked')
         .doc(helperId)
         .set({
-      'blockedAt': FieldValue.serverTimestamp(),
-      'helperId': helperId,
+      'blockedAt':  FieldValue.serverTimestamp(),
+      'helperId':   helperId,
       'helperName': helperName,
     });
     if (context.mounted) {
@@ -773,10 +819,10 @@ class _ChatOptionsSheet extends StatelessWidget {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (_) => _ReportSheet(
-        helperName: helperName,
-        helperId: helperId,
-        bookingId: bookingId,
-        chatId: chatId,
+        helperName:     helperName,
+        helperId:       helperId,
+        bookingId:      bookingId,
+        chatId:         chatId,
         reporterUserId: uid,
       ),
     );
@@ -784,11 +830,11 @@ class _ChatOptionsSheet extends StatelessWidget {
 }
 
 class _OptionTile extends StatelessWidget {
-  final IconData icon;
-  final Color iconColor;
-  final Color iconBg;
-  final String title;
-  final String subtitle;
+  final IconData  icon;
+  final Color     iconColor;
+  final Color     iconBg;
+  final String    title;
+  final String    subtitle;
   final VoidCallback onTap;
 
   const _OptionTile({
@@ -863,71 +909,71 @@ class _ReportSheet extends StatefulWidget {
 }
 
 class _ReportSheetState extends State<_ReportSheet> {
-  int? _selectedReason;
-  final _detailCtrl = TextEditingController();
-  bool _isSubmitting = false;
+  int?   _selectedReason;
+  final  _detailCtrl   = TextEditingController();
+  bool   _isSubmitting = false;
   String? _errorMsg;
 
   static const List<Map<String, dynamic>> _reasons = [
     {
-      'icon': Icons.warning_amber_rounded,
+      'icon':  Icons.warning_amber_rounded,
       'color': Color(0xFFDC2626),
       'label': 'Harassment or Abusive Language',
-      'sub': 'Rude, threatening, or abusive messages',
+      'sub':   'Rude, threatening, or abusive messages',
     },
     {
-      'icon': Icons.block_rounded,
+      'icon':  Icons.block_rounded,
       'color': Color(0xFFD97706),
       'label': 'Inappropriate Content',
-      'sub': 'Offensive or uncomfortable messages',
+      'sub':   'Offensive or uncomfortable messages',
     },
     {
-      'icon': Icons.campaign_rounded,
+      'icon':  Icons.campaign_rounded,
       'color': Color(0xFF0891B2),
       'label': 'Spam or Promotion',
-      'sub': 'Repeated promotions or unwanted messages',
+      'sub':   'Repeated promotions or unwanted messages',
     },
     {
-      'icon': Icons.money_off_rounded,
+      'icon':  Icons.money_off_rounded,
       'color': Color(0xFFDC2626),
       'label': 'Fraud or Scam Attempt',
-      'sub': 'Trying to cheat or defraud',
+      'sub':   'Trying to cheat or defraud',
     },
     {
-      'icon': Icons.engineering_rounded,
+      'icon':  Icons.engineering_rounded,
       'color': Color(0xFF7C3AED),
       'label': 'Unprofessional Behavior',
-      'sub': 'Inappropriate service behavior',
+      'sub':   'Inappropriate service behavior',
     },
     {
-      'icon': Icons.shield_rounded,
+      'icon':  Icons.shield_rounded,
       'color': Color(0xFFDC2626),
       'label': 'Safety Concern',
-      'sub': 'Feeling unsafe with this helper',
+      'sub':   'Feeling unsafe with this helper',
     },
     {
-      'icon': Icons.credit_card_rounded,
+      'icon':  Icons.credit_card_rounded,
       'color': Color(0xFFD97706),
       'label': 'Asking for Personal Information',
-      'sub': 'Requesting OTP, bank details, etc.',
+      'sub':   'Requesting OTP, bank details, etc.',
     },
     {
-      'icon': Icons.chat_bubble_outline_rounded,
+      'icon':  Icons.chat_bubble_outline_rounded,
       'color': Color(0xFF6B7280),
       'label': 'Irrelevant Messages',
-      'sub': 'Unrelated chat content',
+      'sub':   'Unrelated chat content',
     },
     {
-      'icon': Icons.person_off_rounded,
+      'icon':  Icons.person_off_rounded,
       'color': Color(0xFFDC2626),
       'label': 'Fake Helper Identity',
-      'sub': 'Pretending to be a different helper',
+      'sub':   'Pretending to be a different helper',
     },
     {
-      'icon': Icons.help_outline_rounded,
+      'icon':  Icons.help_outline_rounded,
       'color': Color(0xFF374151),
       'label': 'Other',
-      'sub': 'Describe the issue below',
+      'sub':   'Describe the issue below',
     },
   ];
 
@@ -949,14 +995,13 @@ class _ReportSheetState extends State<_ReportSheet> {
 
     setState(() {
       _isSubmitting = true;
-      _errorMsg = null;
+      _errorMsg     = null;
     });
 
     try {
       final reason = _reasons[_selectedReason!]['label'] as String;
       final detail = _detailCtrl.text.trim();
 
-      // Save report to chat_reports collection
       await FirebaseFirestore.instance.collection('chat_reports').add({
         'reporterUserId': widget.reporterUserId,
         'helperId':       widget.helperId,
@@ -968,11 +1013,10 @@ class _ReportSheetState extends State<_ReportSheet> {
         'timestamp':      FieldValue.serverTimestamp(),
       });
 
-      // Auto-flag helper after 3 reports
       final reportsSnap = await FirebaseFirestore.instance
           .collection('chat_reports')
           .where('helperId', isEqualTo: widget.helperId)
-          .where('status', isEqualTo: 'pending')
+          .where('status',   isEqualTo: 'pending')
           .get();
 
       if (reportsSnap.docs.length >= 3) {
@@ -991,13 +1035,11 @@ class _ReportSheetState extends State<_ReportSheet> {
         Navigator.pop(context);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: const Row(children: [
-            Icon(Icons.check_circle_rounded,
-                color: Colors.white, size: 18),
+            Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
             SizedBox(width: 10),
             Expanded(
                 child: Text('Report submitted. Our team will review it.',
-                    style:
-                    TextStyle(fontWeight: FontWeight.w600))),
+                    style: TextStyle(fontWeight: FontWeight.w600))),
           ]),
           backgroundColor: const Color(0xFF059669),
           behavior: SnackBarBehavior.floating,
@@ -1010,7 +1052,7 @@ class _ReportSheetState extends State<_ReportSheet> {
     } catch (e) {
       setState(() {
         _isSubmitting = false;
-        _errorMsg = 'Failed to submit report. Try again.';
+        _errorMsg     = 'Failed to submit report. Try again.';
       });
     }
   }
@@ -1019,8 +1061,8 @@ class _ReportSheetState extends State<_ReportSheet> {
   Widget build(BuildContext context) {
     return DraggableScrollableSheet(
       initialChildSize: 0.85,
-      minChildSize: 0.5,
-      maxChildSize: 0.95,
+      minChildSize:     0.5,
+      maxChildSize:     0.95,
       expand: false,
       builder: (_, ctrl) => Container(
         decoration: const BoxDecoration(
@@ -1029,7 +1071,6 @@ class _ReportSheetState extends State<_ReportSheet> {
         ),
         child: Column(
           children: [
-            // Handle
             Center(
               child: Container(
                 margin: const EdgeInsets.symmetric(vertical: 12),
@@ -1040,8 +1081,6 @@ class _ReportSheetState extends State<_ReportSheet> {
                     borderRadius: BorderRadius.circular(2)),
               ),
             ),
-
-            // Header
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
               child: Row(children: [
@@ -1066,17 +1105,13 @@ class _ReportSheetState extends State<_ReportSheet> {
                               color: Color(0xFF1F2937))),
                       Text('Reporting: ${widget.helperName}',
                           style: const TextStyle(
-                              fontSize: 12,
-                              color: Color(0xFF9CA3AF))),
+                              fontSize: 12, color: Color(0xFF9CA3AF))),
                     ],
                   ),
                 ),
               ]),
             ),
-
             const Divider(height: 1, color: Color(0xFFF3F4F6)),
-
-            // Reason list
             Expanded(
               child: ListView(
                 controller: ctrl,
@@ -1090,11 +1125,10 @@ class _ReportSheetState extends State<_ReportSheet> {
                   const SizedBox(height: 12),
 
                   ...List.generate(_reasons.length, (i) {
-                    final r = _reasons[i];
+                    final r          = _reasons[i];
                     final isSelected = _selectedReason == i;
                     return GestureDetector(
-                      onTap: () =>
-                          setState(() => _selectedReason = i),
+                      onTap: () => setState(() => _selectedReason = i),
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 180),
                         margin: const EdgeInsets.only(bottom: 10),
@@ -1116,8 +1150,7 @@ class _ReportSheetState extends State<_ReportSheet> {
                             width: 40,
                             height: 40,
                             decoration: BoxDecoration(
-                              color: (r['color'] as Color)
-                                  .withOpacity(0.10),
+                              color: (r['color'] as Color).withOpacity(0.10),
                               borderRadius: BorderRadius.circular(11),
                             ),
                             child: Icon(r['icon'] as IconData,
@@ -1126,8 +1159,7 @@ class _ReportSheetState extends State<_ReportSheet> {
                           const SizedBox(width: 12),
                           Expanded(
                             child: Column(
-                              crossAxisAlignment:
-                              CrossAxisAlignment.start,
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(r['label'] as String,
                                     style: TextStyle(
@@ -1152,7 +1184,6 @@ class _ReportSheetState extends State<_ReportSheet> {
                     );
                   }),
 
-                  // Detail box (always visible, required for "Other")
                   const SizedBox(height: 4),
                   const Text('Additional details (optional)',
                       style: TextStyle(
@@ -1162,25 +1193,24 @@ class _ReportSheetState extends State<_ReportSheet> {
                   const SizedBox(height: 8),
                   TextField(
                     controller: _detailCtrl,
-                    maxLines: 3,
-                    maxLength: 300,
+                    maxLines:   3,
+                    maxLength:  300,
                     style: const TextStyle(fontSize: 13),
                     decoration: InputDecoration(
-                      hintText:
-                      'Describe what happened in your own words...',
+                      hintText: 'Describe what happened in your own words...',
                       hintStyle: const TextStyle(
                           color: Color(0xFFADB5BD), fontSize: 13),
-                      filled: true,
+                      filled:    true,
                       fillColor: const Color(0xFFF9FAFB),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(14),
-                        borderSide: const BorderSide(
-                            color: Color(0xFFE5E7EB)),
+                        borderSide:
+                        const BorderSide(color: Color(0xFFE5E7EB)),
                       ),
                       enabledBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(14),
-                        borderSide: const BorderSide(
-                            color: Color(0xFFE5E7EB)),
+                        borderSide:
+                        const BorderSide(color: Color(0xFFE5E7EB)),
                       ),
                       focusedBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(14),
@@ -1213,7 +1243,6 @@ class _ReportSheetState extends State<_ReportSheet> {
                   ],
 
                   const SizedBox(height: 20),
-
                   SizedBox(
                     width: double.infinity,
                     height: 52,
@@ -1256,9 +1285,9 @@ class _ReportSheetState extends State<_ReportSheet> {
 
 class _MessageBubble extends StatelessWidget {
   final String text;
-  final bool isMe;
+  final bool   isMe;
   final String senderName;
-  final int timestamp;
+  final int    timestamp;
 
   const _MessageBubble({
     required this.text,
@@ -1293,9 +1322,7 @@ class _MessageBubble extends StatelessWidget {
               ),
               child: Center(
                 child: Text(
-                  senderName.isNotEmpty
-                      ? senderName[0].toUpperCase()
-                      : 'H',
+                  senderName.isNotEmpty ? senderName[0].toUpperCase() : 'H',
                   style: const TextStyle(
                       color: Colors.white,
                       fontSize: 11,
@@ -1306,9 +1333,8 @@ class _MessageBubble extends StatelessWidget {
           ],
           Flexible(
             child: Column(
-              crossAxisAlignment: isMe
-                  ? CrossAxisAlignment.end
-                  : CrossAxisAlignment.start,
+              crossAxisAlignment:
+              isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
               children: [
                 Container(
                   padding: const EdgeInsets.symmetric(
@@ -1326,27 +1352,25 @@ class _MessageBubble extends StatelessWidget {
                         : null,
                     color: isMe ? null : Colors.white,
                     borderRadius: BorderRadius.only(
-                      topLeft: const Radius.circular(18),
-                      topRight: const Radius.circular(18),
-                      bottomLeft: Radius.circular(isMe ? 18 : 4),
+                      topLeft:     const Radius.circular(18),
+                      topRight:    const Radius.circular(18),
+                      bottomLeft:  Radius.circular(isMe ? 18 : 4),
                       bottomRight: Radius.circular(isMe ? 4 : 18),
                     ),
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withOpacity(0.06),
+                        color:      Colors.black.withOpacity(0.06),
                         blurRadius: 6,
-                        offset: const Offset(0, 2),
+                        offset:     const Offset(0, 2),
                       ),
                     ],
                   ),
                   child: Text(
                     text,
                     style: TextStyle(
-                      color: isMe
-                          ? Colors.white
-                          : const Color(0xFF1F2937),
+                      color:    isMe ? Colors.white : const Color(0xFF1F2937),
                       fontSize: 14,
-                      height: 1.4,
+                      height:   1.4,
                     ),
                   ),
                 ),
@@ -1364,12 +1388,8 @@ class _MessageBubble extends StatelessWidget {
   }
 
   String _fmtTime(DateTime dt) {
-    final h = dt.hour > 12
-        ? dt.hour - 12
-        : dt.hour == 0
-        ? 12
-        : dt.hour;
-    final m = dt.minute.toString().padLeft(2, '0');
+    final h      = dt.hour > 12 ? dt.hour - 12 : dt.hour == 0 ? 12 : dt.hour;
+    final m      = dt.minute.toString().padLeft(2, '0');
     final period = dt.hour >= 12 ? 'PM' : 'AM';
     return '$h:$m $period';
   }
@@ -1388,8 +1408,7 @@ class _SystemMessage extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 10),
       child: Container(
-        padding:
-        const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
           color: const Color(0xFFEDE9FE),
           borderRadius: BorderRadius.circular(16),
@@ -1423,7 +1442,7 @@ class _DateSeparator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final dt = DateTime.fromMillisecondsSinceEpoch(timestamp);
+    final dt  = DateTime.fromMillisecondsSinceEpoch(timestamp);
     final now = DateTime.now();
     String label;
     if (dt.day == now.day && dt.month == now.month && dt.year == now.year) {
@@ -1434,8 +1453,8 @@ class _DateSeparator extends StatelessWidget {
       label = 'Yesterday';
     } else {
       const months = [
-        'Jan','Feb','Mar','Apr','May','Jun',
-        'Jul','Aug','Sep','Oct','Nov','Dec'
+        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
       ];
       label = '${dt.day} ${months[dt.month - 1]}';
     }
@@ -1498,8 +1517,7 @@ class _EmptyChatState extends StatelessWidget {
                     color: Color(0xFF1F2937))),
             const SizedBox(height: 6),
             const Text('Your conversation will appear here.',
-                style:
-                TextStyle(fontSize: 12, color: Color(0xFF9CA3AF))),
+                style: TextStyle(fontSize: 12, color: Color(0xFF9CA3AF))),
           ],
         ),
       ),
@@ -1513,7 +1531,7 @@ class _EmptyChatState extends StatelessWidget {
 
 class _ChatInputBar extends StatelessWidget {
   final TextEditingController controller;
-  final bool isSending;
+  final bool         isSending;
   final VoidCallback onSend;
 
   const _ChatInputBar({
@@ -1531,9 +1549,9 @@ class _ChatInputBar extends StatelessWidget {
         color: Colors.white,
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.06),
+            color:      Colors.black.withOpacity(0.06),
             blurRadius: 10,
-            offset: const Offset(0, -3),
+            offset:     const Offset(0, -3),
           ),
         ],
       ),
@@ -1544,22 +1562,21 @@ class _ChatInputBar extends StatelessWidget {
             child: Container(
               constraints: const BoxConstraints(maxHeight: 120),
               decoration: BoxDecoration(
-                color: const Color(0xFFF4F6FB),
+                color:        const Color(0xFFF4F6FB),
                 borderRadius: BorderRadius.circular(24),
               ),
               child: TextField(
-                controller: controller,
-                maxLines: null,
-                keyboardType: TextInputType.multiline,
-                textCapitalization: TextCapitalization.sentences,
+                controller:           controller,
+                maxLines:             null,
+                keyboardType:         TextInputType.multiline,
+                textCapitalization:   TextCapitalization.sentences,
                 style: const TextStyle(fontSize: 14),
                 decoration: const InputDecoration(
-                  hintText: 'Type a message...',
-                  hintStyle: TextStyle(
-                      color: Color(0xFFADB5BD), fontSize: 14),
-                  border: InputBorder.none,
-                  contentPadding: EdgeInsets.symmetric(
-                      horizontal: 18, vertical: 12),
+                  hintText:  'Type a message...',
+                  hintStyle: TextStyle(color: Color(0xFFADB5BD), fontSize: 14),
+                  border:    InputBorder.none,
+                  contentPadding:
+                  EdgeInsets.symmetric(horizontal: 18, vertical: 12),
                 ),
               ),
             ),
@@ -1568,27 +1585,27 @@ class _ChatInputBar extends StatelessWidget {
           GestureDetector(
             onTap: isSending ? null : onSend,
             child: Container(
-              width: 46,
+              width:  46,
               height: 46,
               decoration: BoxDecoration(
                 gradient: const LinearGradient(
                   colors: [Color(0xFF7C3AED), Color(0xFF5B21B6)],
                   begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
+                  end:   Alignment.bottomRight,
                 ),
                 shape: BoxShape.circle,
                 boxShadow: [
                   BoxShadow(
-                    color: const Color(0xFF7C3AED).withOpacity(0.4),
+                    color:      const Color(0xFF7C3AED).withOpacity(0.4),
                     blurRadius: 8,
-                    offset: const Offset(0, 3),
+                    offset:     const Offset(0, 3),
                   ),
                 ],
               ),
               child: isSending
                   ? const Center(
                 child: SizedBox(
-                  width: 18,
+                  width:  18,
                   height: 18,
                   child: CircularProgressIndicator(
                       color: Colors.white, strokeWidth: 2),

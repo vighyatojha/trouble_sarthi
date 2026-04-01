@@ -611,6 +611,7 @@ class _HelperRatingsFeed extends StatelessWidget {
       stream: FirebaseFirestore.instance
           .collectionGroup('helper_to_user')
           .where('revieweeId', isEqualTo: uid)
+          .orderBy('createdAt', descending: true) // FIXED (Problem C/D): index-backed sort
           .limit(10)
           .snapshots(),
       builder: (context, snap) {
@@ -618,21 +619,13 @@ class _HelperRatingsFeed extends StatelessWidget {
           return const _SimpleShimmer(height: 90, count: 2);
         }
 
-        final docs = (snap.data?.docs ?? [])
-          ..sort((a, b) {
-            final aTs = (a.data() as Map<String, dynamic>)['createdAt'] as Timestamp?;
-            final bTs = (b.data() as Map<String, dynamic>)['createdAt'] as Timestamp?;
-            if (aTs == null && bTs == null) return 0;
-            if (aTs == null) return 1;
-            if (bTs == null) return -1;
-            return bTs.compareTo(aTs);
-          });
+        // FIXED: removed manual ..sort() — Firestore orderBy handles this now
+        final docs = snap.data?.docs ?? [];
         if (docs.isEmpty) return const _EmptyRatings();
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // View All row
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -646,7 +639,7 @@ class _HelperRatingsFeed extends StatelessWidget {
                 ),
                 if (docs.length >= 5)
                   GestureDetector(
-                    onTap: () {}, // Wire to full list page
+                    onTap: () {},
                     child: const Text(
                       'View All',
                       style: TextStyle(
@@ -1595,47 +1588,57 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
         'createdAt':   FieldValue.serverTimestamp(),
       });
 
-      // ── Mark booking completed in Firestore ───────────────────────────
+      // ── FIXED (Problem B): Booking lookup with docId fallback ────────────
       if (isUserRole) {
-        final snap = await FirebaseFirestore.instance
+        final currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
+        // Try by bookingCode field first
+        var bookingSnap = await FirebaseFirestore.instance
             .collection('bookings')
             .where('bookingCode', isEqualTo: widget.bookingId)
-            .where('userId', isEqualTo: FirebaseAuth.instance.currentUser?.uid)
-            .limit(1)
-            .get();
-        if (snap.docs.isNotEmpty) {
-          await snap.docs.first.reference.update({
-            'status':      'completed',
+            .where('userId', isEqualTo: currentUid)
+            .limit(1).get();
+        // Fallback: treat bookingId as the Firestore document ID
+        if (bookingSnap.docs.isEmpty) {
+          final directDoc = await FirebaseFirestore.instance
+              .collection('bookings').doc(widget.bookingId).get();
+          if (directDoc.exists) {
+            await directDoc.reference.update({
+              'status': 'completed',
+              'completedAt': FieldValue.serverTimestamp(),
+            });
+          }
+        } else {
+          await bookingSnap.docs.first.reference.update({
+            'status': 'completed',
             'completedAt': FieldValue.serverTimestamp(),
           });
         }
       }
 
-      // ── Update avg rating on helper/user doc ──────────────────────────
+      // ── FIXED (Problem A): Safe avg rating update with null/missing-doc guard
       final targetCollection = isUserRole ? 'helpers' : 'users';
-      final targetDoc = FirebaseFirestore.instance
-          .collection(targetCollection)
-          .doc(widget.revieweeId);
+      final targetDocRef = FirebaseFirestore.instance
+          .collection(targetCollection).doc(widget.revieweeId);
 
       await FirebaseFirestore.instance.runTransaction((txn) async {
-        final snap = await txn.get(targetDoc);
-        final prev =
-            (snap.data()?['totalRatingSum'] as num?)?.toDouble() ?? 0;
-        final count = (snap.data()?['reviewCount'] as int?) ?? 0;
+        final snap = await txn.get(targetDocRef);
+        final prev = (snap.exists ? (snap.data()?['totalRatingSum'] as num?)?.toDouble() : null) ?? 0.0;
+        final count = (snap.exists ? (snap.data()?['reviewCount'] as int?) : null) ?? 0;
+        final newSum = prev + _starRating;
+        final newCount = count + 1;
         txn.set(
-          targetDoc,
+          targetDocRef,
           {
-            'totalRatingSum': prev + _starRating,
-            'reviewCount':    count + 1,
-            'avgRating':
-            ((prev + _starRating) / (count + 1)).toStringAsFixed(1),
+            'totalRatingSum': newSum,
+            'reviewCount': newCount,
+            'avgRating': double.parse((newSum / newCount).toStringAsFixed(1)),
             'lastReviewedAt': FieldValue.serverTimestamp(),
           },
           SetOptions(merge: true),
         );
       });
 
-      // ── Auto-flag low-rated users ─────────────────────────────────────
+      // ── Auto-flag low-rated users ─────────────────────────────────────────
       if (!isUserRole && _starRating <= 2) {
         await FirebaseFirestore.instance
             .collection('users')
@@ -1646,7 +1649,7 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
         }, SetOptions(merge: true));
       }
 
-      // ── FIXED: Firestore notification (was RTDB — now visible in tab) ──
+      // ── Firestore notification ────────────────────────────────────────────
       if (isUserRole) {
         final currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
         await FirebaseFirestore.instance

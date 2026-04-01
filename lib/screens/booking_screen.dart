@@ -180,7 +180,7 @@ class BookingService {
   static CollectionReference<Map<String, dynamic>> get _addressCol =>
       _db.collection('users').doc(_uid).collection('savedAddresses');
 
-  /// Create a booking in root `bookings`, send Firestore notification + helper ack.
+  /// Create a booking in root `bookings`, create /chats doc, send notification + helper ack.
   static Future<String?> createBooking(
       BookingModel booking, {
         String userName = 'User',
@@ -188,17 +188,40 @@ class BookingService {
     try {
       final ref = await _col.add(booking.toFirestore());
 
-      // ✅ FIXED: Firestore notification (was RTDB)
+      // ── 1. Create / merge chat document so MessagesScreen can list helpers ──
+      if (booking.helperId != null && booking.helperId!.isNotEmpty) {
+        final chatId = '${_uid}_${booking.helperId}';
+        await _db.collection('chats').doc(chatId).set(
+          {
+            'chatId':          chatId,
+            'userId':          _uid,
+            'helperId':        booking.helperId,
+            'helperName':      booking.helperName,
+            'helperPhoto':     '',          // populated later by helper app
+            'serviceName':     booking.serviceName,
+            'bookingId':       booking.id, // bookingCode string, NOT Firestore docId
+            'participants':    [_uid, booking.helperId],
+            'lastMessage':     '',
+            'lastMessageTime': FieldValue.serverTimestamp(),
+            'helperOnline':    true,
+            'bookingStatus':   'active',
+            'createdAt':       FieldValue.serverTimestamp(),
+          },
+          SetOptions(merge: true), // merge so re-bookings don't wipe history
+        );
+      }
+
+      // ✅ Firestore notification
       await FirebaseFirestore.instance
           .collection('notifications')
           .doc(_uid)
           .collection('items')
           .add({
-        'type': 'booking_confirmed',
-        'title': 'Booking Confirmed',
-        'body': 'Your request for "${booking.serviceName}" has been confirmed. Helper: ${booking.helperName}.',
+        'type':      'booking_confirmed',
+        'title':     'Booking Confirmed',
+        'body':      'Your request for "${booking.serviceName}" has been confirmed. Helper: ${booking.helperName}.',
         'bookingId': booking.id,
-        'read': false,
+        'read':      false,
         'createdAt': FieldValue.serverTimestamp(),
       });
 
@@ -222,7 +245,7 @@ class BookingService {
     }
   }
 
-  /// Cancel booking + send Firestore cancellation notification.
+  /// Cancel booking + update /chats status + send Firestore notification.
   static Future<bool> cancelBooking(
       String firestoreId, {
         String? serviceName,
@@ -231,17 +254,35 @@ class BookingService {
     try {
       await _col.doc(firestoreId).update({'status': 'cancelled'});
 
-      // ✅ FIXED: Firestore notification (was RTDB)
+      // ── 2. Update /chats bookingStatus to 'cancelled' ──────────────────────
+      try {
+        final bookingSnap = await _col.doc(firestoreId).get();
+        if (bookingSnap.exists) {
+          final helperId = bookingSnap.data()?['helperId'] as String?;
+          if (helperId != null && helperId.isNotEmpty) {
+            final chatId = '${_uid}_$helperId';
+            await _db
+                .collection('chats')
+                .doc(chatId)
+                .update({'bookingStatus': 'cancelled'});
+          }
+        }
+      } catch (chatErr) {
+        debugPrint('[BookingService] cancelBooking chat update error: $chatErr');
+        // Non-fatal — proceed even if chat update fails
+      }
+
+      // ✅ Firestore notification
       await FirebaseFirestore.instance
           .collection('notifications')
           .doc(_uid)
           .collection('items')
           .add({
-        'type': 'booking_cancelled',
-        'title': 'Booking Cancelled',
-        'body': 'Your booking for "${serviceName ?? 'Service'}" (#${bookingCode ?? firestoreId}) has been cancelled.',
+        'type':      'booking_cancelled',
+        'title':     'Booking Cancelled',
+        'body':      'Your booking for "${serviceName ?? 'Service'}" (#${bookingCode ?? firestoreId}) has been cancelled.',
         'bookingId': bookingCode ?? firestoreId,
-        'read': false,
+        'read':      false,
         'createdAt': FieldValue.serverTimestamp(),
       });
 
@@ -250,6 +291,16 @@ class BookingService {
       debugPrint('[BookingService] cancelBooking error: $e');
       return false;
     }
+  }
+
+  /// Marks the /chats document as completed.
+  /// Call this from the admin/helper side when a booking is finished.
+  static Future<void> markChatCompleted(String userId, String helperId) async {
+    final chatId = '${userId}_$helperId';
+    await _db
+        .collection('chats')
+        .doc(chatId)
+        .update({'bookingStatus': 'completed'});
   }
 
   /// Stream filtered by userId from root collection.
@@ -261,8 +312,12 @@ class BookingService {
         .snapshots()
         .map((snap) => snap.docs
         .map((doc) {
-      try { return BookingModel.fromFirestore(doc.data(), doc.id); }
-      catch (e) { debugPrint('[BookingService] parse error: $e'); return null; }
+      try {
+        return BookingModel.fromFirestore(doc.data(), doc.id);
+      } catch (e) {
+        debugPrint('[BookingService] parse error: $e');
+        return null;
+      }
     })
         .whereType<BookingModel>()
         .toList());
@@ -271,8 +326,11 @@ class BookingService {
   static Future<List<SavedAddress>> getSavedAddresses() async {
     if (_uid.isEmpty) return [];
     try {
-      final snap = await _addressCol.orderBy('createdAt', descending: true).get();
-      return snap.docs.map((d) => SavedAddress.fromFirestore(d.data(), d.id)).toList();
+      final snap =
+      await _addressCol.orderBy('createdAt', descending: true).get();
+      return snap.docs
+          .map((d) => SavedAddress.fromFirestore(d.data(), d.id))
+          .toList();
     } catch (e) {
       debugPrint('[BookingService] getSavedAddresses error: $e');
       return [];
@@ -1034,8 +1092,8 @@ class _ActiveBookingCardState extends State<_ActiveBookingCard>
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
               colors: [
-                Color(0xFF1E0640),
-                Color(0xFF3B0764),
+                Color(0xFF2D0A6B),
+                Color(0xFF4B0FAA),
                 Color(0xFF6D28D9),
               ],
             ),
@@ -1058,8 +1116,8 @@ class _ActiveBookingCardState extends State<_ActiveBookingCard>
               right: -20,
               top: -20,
               child: Container(
-                width: 100,
-                height: 100,
+                width: 110,
+                height: 110,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: Colors.white.withOpacity(0.05),
@@ -1070,8 +1128,8 @@ class _ActiveBookingCardState extends State<_ActiveBookingCard>
               left: -10,
               bottom: -20,
               child: Container(
-                width: 70,
-                height: 70,
+                width: 75,
+                height: 75,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: Colors.white.withOpacity(0.04),
@@ -1083,20 +1141,20 @@ class _ActiveBookingCardState extends State<_ActiveBookingCard>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Row 1: icon + name + status + booking code
+                  // ── Row 1: icon + service name + booking code chip ──────
                   Row(
                     children: [
                       Container(
-                        width: 50,
-                        height: 50,
+                        width: 52,
+                        height: 52,
                         decoration: BoxDecoration(
                           color: Colors.white.withOpacity(0.15),
-                          borderRadius: BorderRadius.circular(15),
+                          borderRadius: BorderRadius.circular(16),
                           border: Border.all(
-                              color: Colors.white.withOpacity(0.2)),
+                              color: Colors.white.withOpacity(0.25)),
                         ),
                         child: Icon(b.serviceIcon,
-                            color: Colors.white, size: 24),
+                            color: Colors.white, size: 26),
                       ),
                       const SizedBox(width: 14),
                       Expanded(
@@ -1108,7 +1166,7 @@ class _ActiveBookingCardState extends State<_ActiveBookingCard>
                                     color: Colors.white,
                                     fontWeight: FontWeight.bold,
                                     fontSize: 16)),
-                            const SizedBox(height: 4),
+                            const SizedBox(height: 5),
                             Row(children: [
                               _PulseDot(),
                               const SizedBox(width: 6),
@@ -1117,7 +1175,7 @@ class _ActiveBookingCardState extends State<_ActiveBookingCard>
                                       color: Color(0xFF86EFAC),
                                       fontSize: 10,
                                       fontWeight: FontWeight.bold,
-                                      letterSpacing: 1.0)),
+                                      letterSpacing: 1.1)),
                             ]),
                           ],
                         ),
@@ -1126,11 +1184,10 @@ class _ActiveBookingCardState extends State<_ActiveBookingCard>
                     ],
                   ),
                   const SizedBox(height: 18),
-                  Container(
-                      height: 1,
-                      color: Colors.white.withOpacity(0.15)),
+                  Container(height: 1, color: Colors.white.withOpacity(0.15)),
                   const SizedBox(height: 16),
-                  // Row 2: helper name + rating + employee ID
+
+                  // ── Row 2: helper name + rating + employee ID ───────────
                   _IconRow(
                     icon: Icons.person_outline_rounded,
                     child: Row(children: [
@@ -1143,7 +1200,7 @@ class _ActiveBookingCardState extends State<_ActiveBookingCard>
                         const SizedBox(width: 8),
                         const Icon(Icons.star_rounded,
                             color: Color(0xFFFBBF24), size: 13),
-                        const SizedBox(width: 2),
+                        const SizedBox(width: 3),
                         Text('${b.helperRating}',
                             style: const TextStyle(
                                 color: Color(0xFFFBBF24),
@@ -1159,27 +1216,30 @@ class _ActiveBookingCardState extends State<_ActiveBookingCard>
                     ]),
                   ),
                   const SizedBox(height: 8),
-                  // Row 3: address
+
+                  // ── Row 3: address ──────────────────────────────────────
                   _IconRow(
                     icon: Icons.location_on_outlined,
                     child: Text(b.address,
                         style: TextStyle(
-                            color: Colors.white.withOpacity(0.72),
+                            color: Colors.white.withOpacity(0.75),
                             fontSize: 12),
                         overflow: TextOverflow.ellipsis),
                   ),
                   const SizedBox(height: 6),
-                  // Row 4: scheduled time
+
+                  // ── Row 4: scheduled time ───────────────────────────────
                   _IconRow(
                     icon: Icons.access_time_rounded,
                     child: Text(
                         '${_formatDate(b.scheduledAt)} · ${_formatTime(b.scheduledAt)}',
                         style: TextStyle(
-                            color: Colors.white.withOpacity(0.72),
+                            color: Colors.white.withOpacity(0.75),
                             fontSize: 12)),
                   ),
-                  const SizedBox(height: 18),
-                  // Row 5: Track + View Details buttons
+                  const SizedBox(height: 20),
+
+                  // ── Row 5: Track Helper + View Details ──────────────────
                   Row(
                     children: [
                       Expanded(
@@ -1264,6 +1324,7 @@ class _BookingCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final b = booking;
+    final isPending = b.status == BookingStatus.pending;
 
     return GestureDetector(
       onTap: () => _openDetails(context, b),
@@ -1274,45 +1335,106 @@ class _BookingCard extends StatelessWidget {
           boxShadow: [
             BoxShadow(
               color: b.serviceColor.withOpacity(0.07),
-              blurRadius: 16, offset: const Offset(0, 4),
+              blurRadius: 16,
+              offset: const Offset(0, 4),
             ),
           ],
         ),
         child: Padding(
           padding: const EdgeInsets.all(16),
-          child: Column(children: [
-            Row(children: [
-              Container(
-                width: 50, height: 50,
-                decoration: BoxDecoration(color: b.serviceBgColor, borderRadius: BorderRadius.circular(14)),
-                child: Icon(b.serviceIcon, color: b.serviceColor, size: 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // ── Row 1: icon + service name + helper + status badge ──────
+              Row(
+                children: [
+                  Container(
+                    width: 52,
+                    height: 52,
+                    decoration: BoxDecoration(
+                      color: b.serviceBgColor,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child:
+                    Icon(b.serviceIcon, color: b.serviceColor, size: 26),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(b.serviceName,
+                            style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                                color: Color(0xFF1F2937))),
+                        const SizedBox(height: 4),
+                        Text(b.helperName,
+                            style: const TextStyle(
+                                fontSize: 12,
+                                color: Color(0xFF6B7280))),
+                      ],
+                    ),
+                  ),
+                  _StatusBadge(status: b.status),
+                ],
               ),
-              const SizedBox(width: 12),
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(b.serviceName,
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Color(0xFF1F2937))),
-                const SizedBox(height: 4),
-                Text(b.helperName, style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
-              ])),
-              _StatusBadge(status: b.status),
-            ]),
-            const SizedBox(height: 14),
-            Container(height: 1, color: const Color(0xFFF3F4F6)),
-            const SizedBox(height: 12),
-            Row(children: [
-              const Icon(Icons.calendar_today_outlined, size: 13, color: Color(0xFF9CA3AF)),
-              const SizedBox(width: 5),
-              Text(_formatDate(b.scheduledAt), style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
-              const SizedBox(width: 12),
-              const Icon(Icons.access_time_rounded, size: 13, color: Color(0xFF9CA3AF)),
-              const SizedBox(width: 5),
-              Text(_formatTime(b.scheduledAt), style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
-              const Spacer(),
-              Text('₹${b.totalAmount?.toStringAsFixed(0) ?? b.baseAmount.toStringAsFixed(0)}',
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: b.serviceColor)),
-            ]),
-            // ← Cancel button intentionally removed. Only available in detail screen.
-          ]),
+              const SizedBox(height: 14),
+              Container(height: 1, color: const Color(0xFFF3F4F6)),
+              const SizedBox(height: 12),
+
+              // ── Row 2: date + time + amount ─────────────────────────────
+              Row(children: [
+                const Icon(Icons.calendar_today_outlined,
+                    size: 13, color: Color(0xFF9CA3AF)),
+                const SizedBox(width: 5),
+                Text(_formatDate(b.scheduledAt),
+                    style: const TextStyle(
+                        fontSize: 12, color: Color(0xFF6B7280))),
+                const SizedBox(width: 12),
+                const Icon(Icons.access_time_rounded,
+                    size: 13, color: Color(0xFF9CA3AF)),
+                const SizedBox(width: 5),
+                Text(_formatTime(b.scheduledAt),
+                    style: const TextStyle(
+                        fontSize: 12, color: Color(0xFF6B7280))),
+                const Spacer(),
+                Text(
+                  '₹${b.totalAmount?.toStringAsFixed(0) ?? b.baseAmount.toStringAsFixed(0)}',
+                  style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: b.serviceColor),
+                ),
+              ]),
+
+              // ── View Details button only for PENDING bookings ───────────
+              if (isPending) ...[
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton(
+                    onPressed: () => _openDetails(context, b),
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(
+                          color: b.serviceColor.withOpacity(0.4)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14)),
+                      padding:
+                      const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                    child: Text(
+                      'View Details',
+                      style: TextStyle(
+                          color: b.serviceColor,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 13),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
         ),
       ),
     );
@@ -1349,18 +1471,18 @@ class _CompletedBookingCard extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Row 1: icon + service/helper + rating + status badge
+              // ── Row 1: icon + service/helper + rating + status badge ───
               Row(
                 children: [
                   Container(
-                    width: 50,
-                    height: 50,
+                    width: 52,
+                    height: 52,
                     decoration: BoxDecoration(
                       color: b.serviceBgColor,
                       borderRadius: BorderRadius.circular(14),
                     ),
                     child: Icon(b.serviceIcon,
-                        color: b.serviceColor, size: 24),
+                        color: b.serviceColor, size: 26),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
@@ -1384,8 +1506,7 @@ class _CompletedBookingCard extends StatelessWidget {
                           if (b.helperRating != null) ...[
                             const SizedBox(width: 6),
                             const Icon(Icons.star_rounded,
-                                size: 12,
-                                color: Color(0xFFFBBF24)),
+                                size: 12, color: Color(0xFFFBBF24)),
                             const SizedBox(width: 2),
                             Text('${b.helperRating}',
                                 style: const TextStyle(
@@ -1400,11 +1521,12 @@ class _CompletedBookingCard extends StatelessWidget {
                   const _StatusBadge(status: BookingStatus.completed),
                 ],
               ),
-              // Tasks done (up to 2)
+
+              // ── Tasks done (up to 2) ────────────────────────────────────
               if (b.tasksDone != null && b.tasksDone!.isNotEmpty) ...[
                 const SizedBox(height: 12),
                 ...b.tasksDone!.take(2).map((task) => Padding(
-                  padding: const EdgeInsets.only(bottom: 5),
+                  padding: const EdgeInsets.only(bottom: 6),
                   child: Row(
                     children: [
                       Container(
@@ -1427,10 +1549,12 @@ class _CompletedBookingCard extends StatelessWidget {
                   ),
                 )),
               ],
+
               const SizedBox(height: 12),
               const Divider(height: 1, color: Color(0xFFF3F4F6)),
               const SizedBox(height: 12),
-              // Row: total paid + Rebook + Invoice
+
+              // ── Bottom row: total paid + Rebook + Invoice ───────────────
               Row(
                 children: [
                   Column(
@@ -1442,13 +1566,14 @@ class _CompletedBookingCard extends StatelessWidget {
                               color: Color(0xFF9CA3AF),
                               fontWeight: FontWeight.bold,
                               letterSpacing: 0.8)),
-                      const SizedBox(height: 2),
+                      const SizedBox(height: 3),
                       Text(
-                          '₹${b.totalAmount?.toStringAsFixed(2) ?? b.baseAmount.toStringAsFixed(2)}',
-                          style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                              color: Color(0xFF1F2937))),
+                        '₹${b.totalAmount?.toStringAsFixed(2) ?? b.baseAmount.toStringAsFixed(2)}',
+                        style: const TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFF1F2937)),
+                      ),
                     ],
                   ),
                   const Spacer(),

@@ -5,11 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/location_model.dart';
 
-/// All Firestore interactions for the location picker feature.
-///
-/// Collections used:
-///   user_locations  — one doc per user, holds their current active location
-///   saved_places    — sub-collection of named places (home / office / other)
+
 class FirestoreService {
   FirestoreService._();
   static final FirestoreService instance = FirestoreService._();

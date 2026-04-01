@@ -252,29 +252,34 @@ class _ConversationTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final data = doc.data() as Map<String, dynamic>;
-    final otherName = data['otherName'] as String? ?? 'Helper';
-    final lastMsg = data['lastMessage'] as String? ?? '';
-    final unread = (data['unreadCount_$currentUid'] as int?) ?? 0;
-    final isOnline = data['helperOnline'] as bool? ?? false;
-    final photoUrl = data['helperPhoto'] as String? ?? '';
-    final ts = data['lastMessageTime'] as Timestamp?;
-    final timeStr = ts != null ? _fmtTime(ts.toDate()) : '';
-    final initial = otherName.isNotEmpty ? otherName[0].toUpperCase() : 'H';
+    final data        = doc.data() as Map<String, dynamic>;
+    final otherName   = data['otherName']   as String? ?? 'Helper';
+    final lastMsg     = data['lastMessage'] as String? ?? '';
+    final unread      = (data['unreadCount_$currentUid'] as int?) ?? 0;
+    final isOnline    = data['helperOnline'] as bool?  ?? false;
+    final photoUrl    = data['helperPhoto']  as String? ?? '';
+    final ts          = data['lastMessageTime'] as Timestamp?;
+    final timeStr     = ts != null ? _fmtTime(ts.toDate()) : '';
+    final initial     = otherName.isNotEmpty ? otherName[0].toUpperCase() : 'H';
+
+    final bookingStatus = data['bookingStatus'] as String? ?? 'active';
+    final isCompleted   = bookingStatus == 'completed';
+    final isCancelled   = bookingStatus == 'cancelled';
+    final isInactive    = isCompleted || isCancelled;
 
     return GestureDetector(
       onTap: () {
-        final data = doc.data() as Map<String, dynamic>;
         Navigator.push(
           context,
           MaterialPageRoute(
             builder: (_) => ChatScreen(
-              chatId:      doc.id,
-              helperName:  data['otherName']   as String? ?? 'Helper',
-              helperId:    data['helperId']    as String? ?? '',
-              helperPhoto: data['helperPhoto'] as String?,
-              bookingId:   data['bookingId']   as String?,
-              serviceName: data['serviceName'] as String?,
+              chatId:        doc.id,
+              helperName:    data['otherName']  as String? ?? 'Helper',
+              helperId:      data['helperId']   as String? ?? '',
+              helperPhoto:   data['helperPhoto'] as String?,
+              bookingId:     data['bookingId']  as String?,
+              serviceName:   data['serviceName'] as String?,
+              bookingStatus: bookingStatus,
             ),
           ),
         );
@@ -284,34 +289,38 @@ class _ConversationTile extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: 12),
         child: Row(
           children: [
-            // Avatar
+            // ── Avatar ──────────────────────────────────────────────────
             Stack(
               children: [
-                Container(
-                  width: 52,
-                  height: 52,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: const LinearGradient(
-                      colors: [Color(0xFFA78BFA), Color(0xFF7C3AED)],
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
+                Opacity(
+                  opacity: isInactive ? 0.55 : 1.0,
+                  child: Container(
+                    width: 52,
+                    height: 52,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFFA78BFA), Color(0xFF7C3AED)],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      image: photoUrl.isNotEmpty
+                          ? DecorationImage(
+                          image: NetworkImage(photoUrl),
+                          fit: BoxFit.cover)
+                          : null,
                     ),
-                    image: photoUrl.isNotEmpty
-                        ? DecorationImage(
-                        image: NetworkImage(photoUrl), fit: BoxFit.cover)
+                    child: photoUrl.isEmpty
+                        ? Center(
+                        child: Text(initial,
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 20)))
                         : null,
                   ),
-                  child: photoUrl.isEmpty
-                      ? Center(
-                      child: Text(initial,
-                          style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 20)))
-                      : null,
                 ),
-                if (isOnline)
+                if (isOnline && !isInactive)
                   Positioned(
                     right: 1,
                     bottom: 1,
@@ -328,6 +337,8 @@ class _ConversationTile extends StatelessWidget {
               ],
             ),
             const SizedBox(width: 12),
+
+            // ── Text content ─────────────────────────────────────────────
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -335,15 +346,59 @@ class _ConversationTile extends StatelessWidget {
                   Row(
                     children: [
                       Expanded(
-                        child: Text(
-                          otherName,
-                          style: TextStyle(
-                            fontSize: 15,
-                            fontWeight:
-                            unread > 0 ? FontWeight.bold : FontWeight.w600,
-                            color: const Color(0xFF1F2937),
-                          ),
-                          overflow: TextOverflow.ellipsis,
+                        child: Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                otherName,
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: unread > 0
+                                      ? FontWeight.bold
+                                      : FontWeight.w600,
+                                  color: isInactive
+                                      ? const Color(0xFF9CA3AF)
+                                      : const Color(0xFF1F2937),
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+
+                            // ── Status pill ──────────────────────────────
+                            if (isCompleted)
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 7, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFD1FAE5),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: const Text(
+                                  'Completed',
+                                  style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                      color: Color(0xFF065F46)),
+                                ),
+                              )
+                            else if (isCancelled)
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 7, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFFEE2E2),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: const Text(
+                                  'Cancelled',
+                                  style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                      color: Color(0xFF991B1B)),
+                                ),
+                              ),
+                          ],
                         ),
                       ),
                       Text(
@@ -353,8 +408,9 @@ class _ConversationTile extends StatelessWidget {
                           color: unread > 0
                               ? const Color(0xFF7C3AED)
                               : const Color(0xFF9CA3AF),
-                          fontWeight:
-                          unread > 0 ? FontWeight.w600 : FontWeight.normal,
+                          fontWeight: unread > 0
+                              ? FontWeight.w600
+                              : FontWeight.normal,
                         ),
                       ),
                     ],
@@ -364,20 +420,30 @@ class _ConversationTile extends StatelessWidget {
                     children: [
                       Expanded(
                         child: Text(
-                          lastMsg,
+                          isCompleted
+                              ? 'Service completed — chat closed'
+                              : isCancelled
+                              ? 'Booking cancelled — chat closed'
+                              : lastMsg,
                           style: TextStyle(
                             fontSize: 13,
-                            color: unread > 0
+                            color: isInactive
+                                ? const Color(0xFFB0B8CC)
+                                : unread > 0
                                 ? const Color(0xFF374151)
                                 : const Color(0xFF9CA3AF),
-                            fontWeight:
-                            unread > 0 ? FontWeight.w500 : FontWeight.normal,
+                            fontWeight: unread > 0 && !isInactive
+                                ? FontWeight.w500
+                                : FontWeight.normal,
+                            fontStyle: isInactive
+                                ? FontStyle.italic
+                                : FontStyle.normal,
                           ),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      if (unread > 0) ...[
+                      if (unread > 0 && !isInactive) ...[
                         const SizedBox(width: 8),
                         Container(
                           padding: const EdgeInsets.symmetric(
@@ -407,7 +473,7 @@ class _ConversationTile extends StatelessWidget {
   }
 
   String _fmtTime(DateTime dt) {
-    final now = DateTime.now();
+    final now  = DateTime.now();
     final diff = now.difference(dt);
     if (diff.inDays == 0) {
       return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';

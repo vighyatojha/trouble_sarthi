@@ -7,7 +7,7 @@ import '../screens/helper_list_screen.dart';
 // ─────────────────────────────────────────────────────────────────────────────
 
 class ServiceCard extends StatefulWidget {
-  final ServiceModel service;
+  final HelperModel service;
   const ServiceCard({super.key, required this.service});
 
   @override

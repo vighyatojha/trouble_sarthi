@@ -23,10 +23,15 @@ class SubServiceItem {
 
 const Map<String, String> _kServiceTypeAliases = {
   'plumber': 'Plumbing',
+  'plumbing': 'Plumbing',           // ← FIX 1: reverse alias added
   'electrician': 'Electrical',
+  'electrical': 'Electrical',       // ← FIX 1: reverse alias added
   'carpenter': 'Carpentry',
+  'carpentry': 'Carpentry',         // ← FIX 1: reverse alias added
   'painter': 'Painting',
+  'painting': 'Painting',           // ← FIX 1: reverse alias added
   'cleaner': 'Cleaning',
+  'cleaning': 'Cleaning',           // ← FIX 1: reverse alias added
   'ac repair': 'AC Repair',
   'ro repair': 'RO Repair',
   'appliance repair': 'Appliance Repair',
@@ -643,18 +648,47 @@ class _HelperListScreenState extends State<HelperListScreen>
   }
 
   // ── Firestore stream ────────────────────────────────────────────────
+  //
+  // FIX 2 of 3: The original query used .where('approved', isEqualTo: true)
+  // which NEVER matches anything — the admin panel does not write an 'approved'
+  // field. It writes:
+  //   • kycStatus = 'approved'   when admin approves KYC
+  //   • isAvailable = true       when admin activates the helper
+  // Both must be true for a helper to appear in the user-facing list.
+  //
+  // IMPORTANT — Composite index required in Firebase Console:
+  //   Firestore → Indexes → Composite → Add index
+  //   Collection: helpers
+  //   Fields:     serviceType (Ascending)
+  //               kycStatus   (Ascending)
+  //               isAvailable (Ascending)
+  // ───────────────────────────────────────────────────────────────────
 
   Stream<List<HelperModel>> _helpersStream(String sidebarName) {
-    final queryValue = _resolveServiceType(sidebarName);
     return FirebaseFirestore.instance
         .collection('helpers')
-        .where('serviceType', isEqualTo: queryValue)
+        .where('subcategory', isEqualTo: sidebarName)
+        .where('kycStatus', isEqualTo: 'approved')
+    // isAvailable filter removed — we handle offline+blocked in UI
         .snapshots()
         .map((snap) => snap.docs
         .map((doc) {
       try {
-        return HelperModel.fromFirestore(
-            doc.data() as Map<String, dynamic>, doc.id);
+        final data = doc.data() as Map<String, dynamic>;
+        // Sanitize location if it was saved as "[object Object]"
+        if (data['location'] is! String ||
+            (data['location'] as String).contains('[object')) {
+          data['location'] = data['area'] ?? 'Location not set';
+        }
+        // Normalize completedJobs — some docs use totalJobs
+        if (!data.containsKey('completedJobs')) {
+          data['completedJobs'] = data['totalJobs'] ?? 0;
+        }
+        // Normalize phoneNumber — some docs use phone
+        if (!data.containsKey('phoneNumber') && data.containsKey('phone')) {
+          data['phoneNumber'] = data['phone'];
+        }
+        return HelperModel.fromFirestore(data, doc.id);
       } catch (_) {
         return null;
       }
@@ -1198,11 +1232,40 @@ class _HelperCardState extends State<_HelperCard> {
     final bgColor = widget.serviceBgColor;
     final initial = h.name.isNotEmpty ? h.name[0].toUpperCase() : '?';
 
+    // ── Resolve display label: prefer subcategory → serviceType → 'Helper'
+    final serviceLabel = (h.subcategory?.isNotEmpty == true
+        ? h.subcategory!
+        : h.serviceType.isNotEmpty
+        ? h.serviceType
+        : 'Helper')
+        .toUpperCase();
+
+    // ── Resolve experience display
+    final expLabel = h.experience.isNotEmpty ? h.experience.toUpperCase() : '—';
+
+    // ── Resolve location display
+    final locationLabel = (h.location.isNotEmpty &&
+        !h.location.contains('[object'))
+        ? h.location
+        : 'Location not set';
+
+    // ── Resolve phone display
+    final phoneLabel = h.phoneNumber.isNotEmpty
+        ? h.phoneNumber
+        : '—';
+
+    // ── Resolve jobs count: completedJobs or totalJobs
+    final jobsDone = h.completedJobs;
+
     return GestureDetector(
       onTapDown: (_) => setState(() => _pressed = true),
       onTapUp: (_) {
         setState(() => _pressed = false);
-        widget.onTap();
+        if (h.isAvailable) {
+          widget.onTap();
+        } else if (!h.isBookingBlocked) {
+          widget.onTap();
+        }
       },
       onTapCancel: () => setState(() => _pressed = false),
       child: AnimatedContainer(
@@ -1222,7 +1285,6 @@ class _HelperCardState extends State<_HelperCard> {
           ],
         ),
         child: Padding(
-          // ── was 16, now 13 (≈20% smaller) ──────────────────────────
           padding: const EdgeInsets.all(13),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1242,7 +1304,7 @@ class _HelperCardState extends State<_HelperCard> {
                               child: Text(
                                 h.name,
                                 style: const TextStyle(
-                                  fontSize: 13,        // was 16
+                                  fontSize: 13,
                                   fontWeight: FontWeight.bold,
                                   color: Color(0xFF111827),
                                   letterSpacing: -0.2,
@@ -1251,20 +1313,15 @@ class _HelperCardState extends State<_HelperCard> {
                                 maxLines: 1,
                               ),
                             ),
-                            // ── gap between name and badge ──────────
-                            // Change this SizedBox width to control spacing:
-                            //   4 = tight,  8 = loose
                             const SizedBox(width: 4),
-                            // ── badge size on the card ──────────────
-                            // Change `size` here to resize the badge on the card
                             const _VerifiedBadge(size: 15),
                           ],
                         ),
-                        const SizedBox(height: 3),     // was 4
+                        const SizedBox(height: 3),
                         Text(
-                          '${h.serviceType.toUpperCase()} • ${h.experience.toUpperCase()}',
+                          '$serviceLabel • $expLabel',
                           style: TextStyle(
-                            fontSize: 9,               // was 11
+                            fontSize: 9,
                             fontWeight: FontWeight.w600,
                             color: Colors.grey.shade500,
                             letterSpacing: 0.1,
@@ -1272,17 +1329,17 @@ class _HelperCardState extends State<_HelperCard> {
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                         ),
-                        const SizedBox(height: 8),     // was 10
+                        const SizedBox(height: 8),
                         Row(
                           crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
                             const Icon(Icons.star_rounded,
-                                size: 13, color: Color(0xFFFBBF24)), // was 16
+                                size: 13, color: Color(0xFFFBBF24)),
                             const SizedBox(width: 2),
                             Text(
                               h.rating.toStringAsFixed(1),
                               style: const TextStyle(
-                                fontSize: 11,           // was 14
+                                fontSize: 11,
                                 fontWeight: FontWeight.bold,
                                 color: Color(0xFF1F2937),
                               ),
@@ -1290,24 +1347,27 @@ class _HelperCardState extends State<_HelperCard> {
                             Text(
                               ' Rating',
                               style: TextStyle(
-                                  fontSize: 10,         // was 12
+                                  fontSize: 10,
                                   color: Colors.grey.shade400),
                             ),
                             const SizedBox(width: 6),
                             _AvailabilityPill(
-                                isAvailable: h.isAvailable),
+                              isAvailable: h.isAvailable,
+                              isBlocked: h.isBookingBlocked,
+                              bookableFrom: h.bookableFrom,
+                            ),
                           ],
                         ),
                       ],
                     ),
                   ),
-                  const SizedBox(width: 11),            // was 14
+                  const SizedBox(width: 11),
                   Container(
-                    width: 58,                          // was 72
-                    height: 58,                         // was 72
+                    width: 58,
+                    height: 58,
                     decoration: BoxDecoration(
                       color: bgColor,
-                      borderRadius: BorderRadius.circular(13), // was 16
+                      borderRadius: BorderRadius.circular(13),
                       border: Border.all(
                           color: color.withOpacity(0.15), width: 1.5),
                     ),
@@ -1320,7 +1380,7 @@ class _HelperCardState extends State<_HelperCard> {
                         errorBuilder: (_, __, ___) => Center(
                           child: Text(initial,
                               style: TextStyle(
-                                  fontSize: 21,         // was 26
+                                  fontSize: 21,
                                   fontWeight: FontWeight.bold,
                                   color: color)),
                         ),
@@ -1329,7 +1389,7 @@ class _HelperCardState extends State<_HelperCard> {
                         : Center(
                       child: Text(initial,
                           style: TextStyle(
-                              fontSize: 21,             // was 26
+                              fontSize: 21,
                               fontWeight: FontWeight.bold,
                               color: color)),
                     ),
@@ -1337,9 +1397,9 @@ class _HelperCardState extends State<_HelperCard> {
                 ],
               ),
 
-              const SizedBox(height: 11),               // was 14
+              const SizedBox(height: 11),
               Container(height: 1, color: const Color(0xFFF0F0F5)),
-              const SizedBox(height: 10),               // was 12
+              const SizedBox(height: 10),
 
               // ── SECTION 2: Phone  |  Location ───────────────────────
               Row(
@@ -1349,15 +1409,13 @@ class _HelperCardState extends State<_HelperCard> {
                       crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
                         Icon(Icons.phone_outlined,
-                            size: 12, color: Colors.grey.shade500), // was 15
+                            size: 12, color: Colors.grey.shade500),
                         const SizedBox(width: 5),
                         Expanded(
                           child: Text(
-                            h.phoneNumber.isNotEmpty
-                                ? h.phoneNumber
-                                : '—',
+                            phoneLabel,
                             style: TextStyle(
-                              fontSize: 11,             // was 13
+                              fontSize: 11,
                               fontWeight: FontWeight.w500,
                               color: Colors.grey.shade700,
                             ),
@@ -1372,13 +1430,13 @@ class _HelperCardState extends State<_HelperCard> {
                       crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
                         Icon(Icons.location_on_outlined,
-                            size: 12, color: Colors.grey.shade500), // was 15
+                            size: 12, color: Colors.grey.shade500),
                         const SizedBox(width: 5),
                         Expanded(
                           child: Text(
-                            h.location,
+                            locationLabel,
                             style: TextStyle(
-                              fontSize: 11,             // was 13
+                              fontSize: 11,
                               fontWeight: FontWeight.w500,
                               color: Colors.grey.shade700,
                             ),
@@ -1391,9 +1449,9 @@ class _HelperCardState extends State<_HelperCard> {
                 ],
               ),
 
-              const SizedBox(height: 10),               // was 12
+              const SizedBox(height: 10),
               Container(height: 1, color: const Color(0xFFF0F0F5)),
-              const SizedBox(height: 10),               // was 12
+              const SizedBox(height: 10),
 
               // ── SECTION 3: Starting At  |  Jobs Done  |  Book Now ───
               Row(
@@ -1404,7 +1462,7 @@ class _HelperCardState extends State<_HelperCard> {
                     children: [
                       Text('STARTING AT',
                           style: TextStyle(
-                              fontSize: 8,              // was 9
+                              fontSize: 8,
                               fontWeight: FontWeight.w700,
                               color: Colors.grey.shade500,
                               letterSpacing: 0.5)),
@@ -1412,28 +1470,28 @@ class _HelperCardState extends State<_HelperCard> {
                       Text(
                         '₹${h.pricePerHour.toInt()}/hr',
                         style: const TextStyle(
-                          fontSize: 13,                 // was 16
+                          fontSize: 13,
                           fontWeight: FontWeight.bold,
                           color: Color(0xFF111827),
                         ),
                       ),
                     ],
                   ),
-                  const SizedBox(width: 14),            // was 18
+                  const SizedBox(width: 14),
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text('JOBS DONE',
                           style: TextStyle(
-                              fontSize: 8,              // was 9
+                              fontSize: 8,
                               fontWeight: FontWeight.w700,
                               color: Colors.grey.shade500,
                               letterSpacing: 0.5)),
                       const SizedBox(height: 2),
                       Text(
-                        '${h.completedJobs}',
+                        '$jobsDone',
                         style: const TextStyle(
-                          fontSize: 13,                 // was 16
+                          fontSize: 13,
                           fontWeight: FontWeight.bold,
                           color: Color(0xFF111827),
                         ),
@@ -1441,12 +1499,39 @@ class _HelperCardState extends State<_HelperCard> {
                     ],
                   ),
                   const Spacer(),
+
+                  // ── Book Now / Blocked / Notify Me button ───────────
                   GestureDetector(
-                    onTap: widget.onTap,
+                    onTap: () {
+                      if (h.isAvailable) {
+                        widget.onTap();
+                      } else if (h.isBookingBlocked) {
+                        final remaining = 60 - h.offlineDuration.inMinutes;
+                        final bookableAt = h.bookableFrom != null
+                            ? '${h.bookableFrom!.hour}:${h.bookableFrom!.minute.toString().padLeft(2, '0')}'
+                            : 'later';
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              '${h.name} is offline. Booking available after $bookableAt ($remaining min remaining).',
+                            ),
+                            backgroundColor: const Color(0xFFDC2626),
+                            behavior: SnackBarBehavior.floating,
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12)),
+                            margin: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 10),
+                          ),
+                        );
+                      } else {
+                        // Offline but 1 hour passed — allow booking
+                        widget.onTap();
+                      }
+                    },
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 130),
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 11), // was 18/13
+                          horizontal: 14, vertical: 11),
                       decoration: BoxDecoration(
                         gradient: h.isAvailable
                             ? LinearGradient(
@@ -1457,6 +1542,13 @@ class _HelperCardState extends State<_HelperCard> {
                           ],
                           begin: Alignment.topLeft,
                           end: Alignment.bottomRight,
+                        )
+                            : h.isBookingBlocked
+                            ? const LinearGradient(
+                          colors: [
+                            Color(0xFFDC2626),
+                            Color(0xFFEF4444),
+                          ],
                         )
                             : const LinearGradient(
                           colors: [
@@ -1473,6 +1565,15 @@ class _HelperCardState extends State<_HelperCard> {
                             offset: const Offset(0, 5),
                           ),
                         ]
+                            : h.isBookingBlocked
+                            ? [
+                          BoxShadow(
+                            color: const Color(0xFFDC2626)
+                                .withOpacity(0.25),
+                            blurRadius: 10,
+                            offset: const Offset(0, 4),
+                          ),
+                        ]
                             : [],
                       ),
                       child: Row(
@@ -1481,19 +1582,25 @@ class _HelperCardState extends State<_HelperCard> {
                           Icon(
                             h.isAvailable
                                 ? Icons.calendar_month_rounded
+                                : h.isBookingBlocked
+                                ? Icons.lock_clock_outlined
                                 : Icons.notifications_outlined,
-                            size: 13,                   // was 16
-                            color: h.isAvailable
+                            size: 13,
+                            color: h.isAvailable || h.isBookingBlocked
                                 ? Colors.white
                                 : const Color(0xFF9CA3AF),
                           ),
-                          const SizedBox(width: 5),     // was 7
+                          const SizedBox(width: 5),
                           Text(
-                            h.isAvailable ? 'Book Now' : 'Notify Me',
+                            h.isAvailable
+                                ? 'Book Now'
+                                : h.isBookingBlocked
+                                ? 'Blocked'
+                                : 'Notify Me',
                             style: TextStyle(
-                              fontSize: 12,             // was 14
+                              fontSize: 12,
                               fontWeight: FontWeight.bold,
-                              color: h.isAvailable
+                              color: h.isAvailable || h.isBookingBlocked
                                   ? Colors.white
                                   : const Color(0xFF9CA3AF),
                             ),
@@ -1538,6 +1645,25 @@ class _HelperProfileSheet extends StatelessWidget {
     final bgColor = serviceBgColor;
     final initial = h.name.isNotEmpty ? h.name[0].toUpperCase() : '?';
 
+    // ── FIX 3: Resolve display label: subcategory → serviceType → 'Helper'
+    final serviceLabel = h.subcategory?.isNotEmpty == true
+        ? h.subcategory!
+        : h.serviceType.isNotEmpty
+        ? h.serviceType
+        : 'Helper';
+
+    // ── FIX: Sanitize location
+    final locationLabel =
+    (h.location.isNotEmpty && !h.location.contains('[object'))
+        ? h.location
+        : 'Location not set';
+
+    // ── FIX: Normalize phone
+    final phoneLabel = h.phoneNumber.isNotEmpty ? h.phoneNumber : '—';
+
+    // ── FIX: Normalize jobs
+    final jobsDone = h.completedJobs;
+
     return DraggableScrollableSheet(
       initialChildSize: 0.88,
       minChildSize: 0.5,
@@ -1567,8 +1693,7 @@ class _HelperProfileSheet extends StatelessWidget {
                   SliverToBoxAdapter(
                     child: Center(
                       child: Container(
-                        margin:
-                        const EdgeInsets.only(top: 10, bottom: 4),
+                        margin: const EdgeInsets.only(top: 10, bottom: 4),
                         width: 42,
                         height: 4,
                         decoration: BoxDecoration(
@@ -1593,8 +1718,7 @@ class _HelperProfileSheet extends StatelessWidget {
                                   color: Color(0xFFF3F4F6),
                                   shape: BoxShape.circle),
                               child: const Icon(Icons.close_rounded,
-                                  size: 18,
-                                  color: Color(0xFF4B5563)),
+                                  size: 18, color: Color(0xFF4B5563)),
                             ),
                           ),
                           const Expanded(
@@ -1612,14 +1736,12 @@ class _HelperProfileSheet extends StatelessWidget {
                   ),
 
                   const SliverToBoxAdapter(
-                      child: Divider(
-                          height: 1, color: Color(0xFFF3F4F6))),
+                      child: Divider(height: 1, color: Color(0xFFF3F4F6))),
 
                   // Hero card
                   SliverToBoxAdapter(
                     child: Padding(
-                      padding:
-                      const EdgeInsets.fromLTRB(16, 20, 16, 0),
+                      padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
                       child: Container(
                         padding: const EdgeInsets.all(18),
                         decoration: BoxDecoration(
@@ -1629,8 +1751,8 @@ class _HelperProfileSheet extends StatelessWidget {
                             end: Alignment.bottomRight,
                           ),
                           borderRadius: BorderRadius.circular(22),
-                          border: Border.all(
-                              color: color.withOpacity(0.12)),
+                          border:
+                          Border.all(color: color.withOpacity(0.12)),
                           boxShadow: [
                             BoxShadow(
                                 color: color.withOpacity(0.08),
@@ -1639,14 +1761,14 @@ class _HelperProfileSheet extends StatelessWidget {
                           ],
                         ),
                         child: Row(
-                          crossAxisAlignment:
-                          CrossAxisAlignment.start,
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Expanded(
                               child: Column(
                                 crossAxisAlignment:
                                 CrossAxisAlignment.start,
                                 children: [
+                                  // Name + verified badge
                                   Row(
                                     crossAxisAlignment:
                                     CrossAxisAlignment.center,
@@ -1655,28 +1777,27 @@ class _HelperProfileSheet extends StatelessWidget {
                                         child: Text(h.name,
                                             style: const TextStyle(
                                                 fontSize: 18,
-                                                fontWeight:
-                                                FontWeight.bold,
-                                                color: Color(
-                                                    0xFF111827))),
+                                                fontWeight: FontWeight.bold,
+                                                color:
+                                                Color(0xFF111827))),
                                       ),
-                                      // ── gap between name and badge in profile sheet ──
-                                      // Change this SizedBox width to control spacing
                                       const SizedBox(width: 7),
-                                      // ── badge size in profile sheet ──
-                                      // Change `size` here to resize the badge in the sheet
                                       const _VerifiedBadge(size: 22),
                                     ],
                                   ),
                                   const SizedBox(height: 5),
+
+                                  // ── FIX 3: subcategory → serviceType → 'Helper'
                                   Text(
-                                    '${h.serviceType} specialist with ${h.experience} of experience',
+                                    '$serviceLabel specialist with ${h.experience} of experience',
                                     style: TextStyle(
                                         fontSize: 12,
                                         color: Colors.grey.shade500,
                                         height: 1.5),
                                   ),
                                   const SizedBox(height: 10),
+
+                                  // Rating + availability
                                   Row(children: [
                                     const Icon(Icons.star_rounded,
                                         size: 15,
@@ -1693,34 +1814,37 @@ class _HelperProfileSheet extends StatelessWidget {
                                     _AvailabilityPill(
                                         isAvailable: h.isAvailable),
                                   ]),
-                                  if (h.phoneNumber.isNotEmpty) ...[
+
+                                  // Phone — FIX: normalized
+                                  if (phoneLabel != '—') ...[
                                     const SizedBox(height: 8),
                                     Row(children: [
                                       Icon(Icons.phone_outlined,
                                           size: 13,
                                           color: Colors.grey.shade500),
                                       const SizedBox(width: 6),
-                                      Text(h.phoneNumber,
+                                      Text(phoneLabel,
                                           style: TextStyle(
                                               fontSize: 13,
-                                              color: Colors
-                                                  .grey.shade700,
+                                              color: Colors.grey.shade700,
                                               fontWeight:
                                               FontWeight.w500)),
                                     ]),
                                   ],
+
                                   const SizedBox(height: 5),
+
+                                  // Location — FIX: sanitized
                                   Row(children: [
                                     Icon(Icons.location_on_outlined,
                                         size: 13,
                                         color: Colors.grey.shade500),
                                     const SizedBox(width: 6),
                                     Flexible(
-                                      child: Text(h.location,
+                                      child: Text(locationLabel,
                                           style: TextStyle(
                                               fontSize: 13,
-                                              color: Colors
-                                                  .grey.shade700,
+                                              color: Colors.grey.shade700,
                                               fontWeight:
                                               FontWeight.w500)),
                                     ),
@@ -1729,6 +1853,8 @@ class _HelperProfileSheet extends StatelessWidget {
                               ),
                             ),
                             const SizedBox(width: 14),
+
+                            // Avatar
                             Stack(
                               children: [
                                 Container(
@@ -1742,11 +1868,9 @@ class _HelperProfileSheet extends StatelessWidget {
                                         width: 2.5),
                                     boxShadow: [
                                       BoxShadow(
-                                          color:
-                                          color.withOpacity(0.12),
+                                          color: color.withOpacity(0.12),
                                           blurRadius: 12,
-                                          offset:
-                                          const Offset(0, 4)),
+                                          offset: const Offset(0, 4)),
                                     ],
                                   ),
                                   child: h.profileImage != null
@@ -1754,17 +1878,15 @@ class _HelperProfileSheet extends StatelessWidget {
                                     child: Image.network(
                                       h.profileImage!,
                                       fit: BoxFit.cover,
-                                      errorBuilder:
-                                          (_, __, ___) => Center(
-                                        child: Text(
-                                          initial,
-                                          style: TextStyle(
-                                              fontSize: 30,
-                                              fontWeight:
-                                              FontWeight.bold,
-                                              color: color),
-                                        ),
-                                      ),
+                                      errorBuilder: (_, __, ___) =>
+                                          Center(
+                                            child: Text(initial,
+                                                style: TextStyle(
+                                                    fontSize: 30,
+                                                    fontWeight:
+                                                    FontWeight.bold,
+                                                    color: color)),
+                                          ),
                                     ),
                                   )
                                       : Center(
@@ -1784,12 +1906,10 @@ class _HelperProfileSheet extends StatelessWidget {
                                       width: 18,
                                       height: 18,
                                       decoration: BoxDecoration(
-                                        color:
-                                        const Color(0xFF22C55E),
+                                        color: const Color(0xFF22C55E),
                                         shape: BoxShape.circle,
                                         border: Border.all(
-                                            color: Colors.white,
-                                            width: 2),
+                                            color: Colors.white, width: 2),
                                       ),
                                     ),
                                   ),
@@ -1801,14 +1921,12 @@ class _HelperProfileSheet extends StatelessWidget {
                     ),
                   ),
 
-                  const SliverToBoxAdapter(
-                      child: SizedBox(height: 18)),
+                  const SliverToBoxAdapter(child: SizedBox(height: 18)),
 
-                  // Stats row
+                  // Stats row — FIX: jobsDone normalized
                   SliverToBoxAdapter(
                     child: Padding(
-                      padding:
-                      const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                       child: Row(
                         children: [
                           _StatBubble(
@@ -1821,7 +1939,9 @@ class _HelperProfileSheet extends StatelessWidget {
                           const SizedBox(width: 10),
                           _StatBubble(
                             label: 'EXPERIENCE',
-                            value: h.experience,
+                            value: h.experience.isNotEmpty
+                                ? h.experience
+                                : '—',
                             sub: 'in field',
                             color: color,
                             icon: Icons.workspace_premium_rounded,
@@ -1829,7 +1949,7 @@ class _HelperProfileSheet extends StatelessWidget {
                           const SizedBox(width: 10),
                           _StatBubble(
                             label: 'JOBS',
-                            value: '${h.completedJobs}',
+                            value: '$jobsDone', // ── FIX: normalized
                             sub: 'completed',
                             color: const Color(0xFF16A34A),
                             icon: Icons.check_circle_outline_rounded,
@@ -1843,11 +1963,9 @@ class _HelperProfileSheet extends StatelessWidget {
                   if (h.skills.isNotEmpty)
                     SliverToBoxAdapter(
                       child: Padding(
-                        padding:
-                        const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                         child: Column(
-                          crossAxisAlignment:
-                          CrossAxisAlignment.start,
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             const Text('Skills & Specialties',
                                 style: TextStyle(
@@ -1865,12 +1983,13 @@ class _HelperProfileSheet extends StatelessWidget {
                                     horizontal: 12,
                                     vertical: 7),
                                 decoration: BoxDecoration(
-                                  color: color.withOpacity(0.08),
+                                  color:
+                                  color.withOpacity(0.08),
                                   borderRadius:
                                   BorderRadius.circular(20),
                                   border: Border.all(
-                                      color:
-                                      color.withOpacity(0.2)),
+                                      color: color
+                                          .withOpacity(0.2)),
                                 ),
                                 child: Text(s,
                                     style: TextStyle(
@@ -1889,8 +2008,7 @@ class _HelperProfileSheet extends StatelessWidget {
                   // Pricing card
                   SliverToBoxAdapter(
                     child: Padding(
-                      padding:
-                      const EdgeInsets.fromLTRB(16, 0, 16, 30),
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 30),
                       child: Container(
                         padding: const EdgeInsets.all(18),
                         decoration: BoxDecoration(
@@ -1913,13 +2031,10 @@ class _HelperProfileSheet extends StatelessWidget {
                               height: 44,
                               decoration: BoxDecoration(
                                 color: color.withOpacity(0.12),
-                                borderRadius:
-                                BorderRadius.circular(13),
+                                borderRadius: BorderRadius.circular(13),
                               ),
-                              child: Icon(
-                                  Icons.currency_rupee_rounded,
-                                  size: 22,
-                                  color: color),
+                              child: Icon(Icons.currency_rupee_rounded,
+                                  size: 22, color: color),
                             ),
                             const SizedBox(width: 14),
                             Expanded(
@@ -1931,15 +2046,13 @@ class _HelperProfileSheet extends StatelessWidget {
                                       style: TextStyle(
                                           fontSize: 13,
                                           color: color,
-                                          fontWeight:
-                                          FontWeight.w700)),
+                                          fontWeight: FontWeight.w700)),
                                   const SizedBox(height: 2),
                                   const Text(
                                       'Final price depends on job complexity',
                                       style: TextStyle(
                                           fontSize: 10,
-                                          color:
-                                          Color(0xFF9CA3AF))),
+                                          color: Color(0xFF9CA3AF))),
                                 ],
                               ),
                             ),
@@ -1961,7 +2074,7 @@ class _HelperProfileSheet extends StatelessWidget {
 
             // Fixed bottom — Book Now button
             Container(
-              padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
+              padding: const EdgeInsets.fromLTRB(20, 14, 20, 14),
               decoration: const BoxDecoration(
                 color: Colors.white,
                 boxShadow: [
@@ -1985,8 +2098,8 @@ class _HelperProfileSheet extends StatelessWidget {
                           helperName: h.name,
                           helperId: h.id,
                           helperRating: h.rating,
-                          helperJobCount: h.completedJobs,
-                          serviceName: h.serviceType,
+                          helperJobCount: jobsDone, // ── FIX: normalized
+                          serviceName: serviceLabel, // ── FIX: subcategory label
                           categoryName: categoryName,
                           serviceColor: serviceColor,
                           serviceBgColor: serviceBgColor,
@@ -1994,18 +2107,18 @@ class _HelperProfileSheet extends StatelessWidget {
                           pricePerHour: h.pricePerHour,
                         );
                       } else {
-                        ScaffoldMessenger.of(context)
-                            .showSnackBar(SnackBar(
-                          content: Text(
-                              '${h.name} is currently busy. You\'ll be notified when available.'),
-                          backgroundColor: const Color(0xFF6B7280),
-                          behavior: SnackBarBehavior.floating,
-                          shape: RoundedRectangleBorder(
-                              borderRadius:
-                              BorderRadius.circular(12)),
-                          margin: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 10),
-                        ));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                                '${h.name} is currently busy. You\'ll be notified when available.'),
+                            backgroundColor: const Color(0xFF6B7280),
+                            behavior: SnackBarBehavior.floating,
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12)),
+                            margin: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 10),
+                          ),
+                        );
                       }
                     },
                     icon: Icon(
@@ -2049,22 +2162,52 @@ class _HelperProfileSheet extends StatelessWidget {
 
 class _AvailabilityPill extends StatelessWidget {
   final bool isAvailable;
-  const _AvailabilityPill({required this.isAvailable});
+  final bool isBlocked;
+  final DateTime? bookableFrom;
+
+  const _AvailabilityPill({
+    required this.isAvailable,
+    this.isBlocked = false,
+    this.bookableFrom,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final Color bgColor;
+    final Color borderColor;
+    final Color dotColor;
+    final Color textColor;
+    final String label;
+
+    if (isAvailable) {
+      bgColor = const Color(0xFFEFF6FF);
+      borderColor = const Color(0xFFBFDBFE);
+      dotColor = const Color(0xFF22C55E);
+      textColor = const Color(0xFF16A34A);
+      label = 'AVAILABLE';
+    } else if (isBlocked) {
+      bgColor = const Color(0xFFFEF2F2);
+      borderColor = const Color(0xFFFECACA);
+      dotColor = const Color(0xFFDC2626);
+      textColor = const Color(0xFFDC2626);
+      final t = bookableFrom;
+      label = t != null
+          ? 'FROM ${t.hour}:${t.minute.toString().padLeft(2, '0')}'
+          : 'BLOCKED';
+    } else {
+      bgColor = const Color(0xFFFFF7ED);
+      borderColor = const Color(0xFFFED7AA);
+      dotColor = const Color(0xFFF97316);
+      textColor = const Color(0xFFF97316);
+      label = 'BUSY';
+    }
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
       decoration: BoxDecoration(
-        color: isAvailable
-            ? const Color(0xFFEFF6FF)
-            : const Color(0xFFFFF7ED),
+        color: bgColor,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: isAvailable
-              ? const Color(0xFFBFDBFE)
-              : const Color(0xFFFED7AA),
-        ),
+        border: Border.all(color: borderColor),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -2072,23 +2215,16 @@ class _AvailabilityPill extends StatelessWidget {
           Container(
             width: 6,
             height: 6,
-            decoration: BoxDecoration(
-              color: isAvailable
-                  ? const Color(0xFF22C55E)
-                  : const Color(0xFFF97316),
-              shape: BoxShape.circle,
-            ),
+            decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle),
           ),
           const SizedBox(width: 5),
           Text(
-            isAvailable ? 'AVAILABLE' : 'BUSY',
+            label,
             style: TextStyle(
               fontSize: 10,
               fontWeight: FontWeight.w800,
               letterSpacing: 0.3,
-              color: isAvailable
-                  ? const Color(0xFF16A34A)
-                  : const Color(0xFFF97316),
+              color: textColor,
             ),
           ),
         ],

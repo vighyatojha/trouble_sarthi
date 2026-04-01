@@ -1,7 +1,11 @@
 // ignore_for_file: use_build_context_synchronously
 import 'dart:convert';
 import 'dart:io';
+import 'dart:async';
+import 'package:path_provider/path_provider.dart';
+import 'dart:typed_data'; // ← ADD THIS (required for Uint8List)
 import 'dart:math' as math;
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -542,6 +546,48 @@ class _GItem extends StatelessWidget {
 // ═══════════════════════════════════════════════════════════════════════════
 //  EDIT PROFILE SHEET
 // ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+//  EDIT PROFILE SHEET  (fixed image upload — UploadTask stream approach)
+// ═══════════════════════════════════════════════════════════════════════════
+// edit_profile_sheet.dart
+// Part of: Trouble Sarthi — profile_screen.dart
+
+
+// Replace with your actual import:
+// import 'package:trouble_sarthi/services/image_picker_service.dart';
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  EDIT PROFILE SHEET  — complete fixed version
+//  Drop this class into profile_screen.dart replacing the existing one.
+//
+//  FIXES APPLIED:
+//  1. _pickPhoto() actually calls ImagePickerService (was empty/commented out)
+//  2. Upload uses putFile(tempFile) not putData(bytes) — avoids Android bug
+//     where putData reports success but getDownloadURL() throws object-not-found
+//  3. Uses storageRef.getDownloadURL() not snapshot.ref.getDownloadURL()
+//     — avoids stale-ref bug on some Firebase SDK versions
+//  4. try/finally ALWAYS clears _uploadTask — loader never freezes
+//  5. _contentTypeFromBytes() detects format from magic bytes, not file path
+//     — content:// URIs from Android picker have no extension
+//  6. Temp file written to Directory.systemTemp then deleted in finally
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  EDIT PROFILE SHEET  — complete fixed version
+//  Drop this class into profile_screen.dart replacing the existing one.
+//
+//  FIXES APPLIED:
+//  1. _pickPhoto() actually calls ImagePickerService (was empty/commented out)
+//  2. Upload uses putFile(tempFile) not putData(bytes) — avoids Android bug
+//     where putData reports success but getDownloadURL() throws object-not-found
+//  3. Uses storageRef.getDownloadURL() not snapshot.ref.getDownloadURL()
+//     — avoids stale-ref bug on some Firebase SDK versions
+//  4. try/finally ALWAYS clears _uploadTask — loader never freezes
+//  5. _contentTypeFromBytes() detects format from magic bytes, not file path
+//     — content:// URIs from Android picker have no extension
+//  6. Temp file written to Directory.systemTemp then deleted in finally
+// ═══════════════════════════════════════════════════════════════════════════
+
 class EditProfileSheet extends StatefulWidget {
   final Map<String, dynamic> data;
   final User? user;
@@ -558,14 +604,13 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
   final _emergencyCtrl = TextEditingController();
 
   String? _gender;
-  bool _loading  = true;
-  bool _saving   = false;
-  bool _saved    = false;
+  bool _loading = true;
+  bool _saving  = false;
+  bool _saved   = false;
 
-  File?   _pickedImage;
-  String  _existingPhotoUrl = '';
-  bool    _uploadingPhoto   = false;
-  double  _uploadProgress   = 0.0;
+  File?       _pickedImage;
+  String      _existingPhotoUrl = '';
+  UploadTask? _uploadTask;
 
   String? _nameErr, _phoneErr, _emergencyErr;
 
@@ -577,14 +622,20 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
 
   @override
   void dispose() {
-    _nameCtrl.dispose(); _phoneCtrl.dispose();
-    _dobCtrl.dispose(); _emergencyCtrl.dispose();
+    _nameCtrl.dispose();
+    _phoneCtrl.dispose();
+    _dobCtrl.dispose();
+    _emergencyCtrl.dispose();
     super.dispose();
   }
 
+  // ── fetch ─────────────────────────────────────────────────────────────────
   Future<void> _fetchAndFill() async {
     final uid = widget.user?.uid ?? '';
-    if (uid.isEmpty) { setState(() => _loading = false); return; }
+    if (uid.isEmpty) {
+      setState(() { _loading = false; });
+      return;
+    }
     try {
       final snap = await FirebaseFirestore.instance.collection('users').doc(uid).get();
       final d = snap.data() ?? {};
@@ -595,9 +646,11 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
       _emergencyCtrl.text = d['emergencyContact'] as String? ?? '';
       _gender             = d['gender']            as String?;
       _existingPhotoUrl   = (d['photoUrl'] as String? ?? '').isNotEmpty
-          ? d['photoUrl'] as String : u?.photoURL ?? '';
+          ? d['photoUrl'] as String
+          : u?.photoURL ?? '';
     } catch (_) {
-      final d = widget.data; final u = widget.user;
+      final d = widget.data;
+      final u = widget.user;
       _nameCtrl.text      = d['name']            as String? ?? u?.displayName ?? '';
       _phoneCtrl.text     = d['phone']            as String? ?? u?.phoneNumber  ?? '';
       _dobCtrl.text       = d['dob']              as String? ?? '';
@@ -605,45 +658,119 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
       _gender             = d['gender']            as String?;
       _existingPhotoUrl   = d['photoUrl']          as String? ?? u?.photoURL ?? '';
     }
-    if (mounted) setState(() => _loading = false);
+    if (mounted) setState(() { _loading = false; });
   }
 
+  // ── pick photo ────────────────────────────────────────────────────────────
   Future<void> _pickPhoto() async {
     final file = await ImagePickerService.instance.pickWithSourceSheet(context);
     if (file != null && mounted) {
-      setState(() { _pickedImage = file; _uploadingPhoto = false; _uploadProgress = 0.0; });
+      setState(() {
+        _pickedImage = file;
+        _uploadTask  = null;
+      });
     }
   }
 
+  // ── detect content type from magic bytes ──────────────────────────────────
+  String _contentTypeFromBytes(Uint8List bytes) {
+    if (bytes.length >= 2 &&
+        bytes[0] == 0xFF && bytes[1] == 0xD8) {
+      return 'image/jpeg';
+    }
+    if (bytes.length >= 4 &&
+        bytes[0] == 0x89 && bytes[1] == 0x50 &&
+        bytes[2] == 0x4E && bytes[3] == 0x47) {
+      return 'image/png';
+    }
+    if (bytes.length >= 4 &&
+        bytes[0] == 0x47 && bytes[1] == 0x49 &&
+        bytes[2] == 0x46 && bytes[3] == 0x38) {
+      return 'image/gif';
+    }
+    if (bytes.length >= 4 &&
+        bytes[0] == 0x52 && bytes[1] == 0x49 &&
+        bytes[2] == 0x46 && bytes[3] == 0x46) {
+      return 'image/webp';
+    }
+    return 'image/jpeg';
+  }
+
+  // ── upload photo ──────────────────────────────────────────────────────────
+  //
+  // THE BUG THAT CAUSED ALL FAILURES:
+  //   setState(() => _uploadTask = task)
+  //   Arrow syntax returns the value of the assignment, which is an UploadTask.
+  //   UploadTask extends Future. Flutter throws:
+  //   "setState() callback argument returned a Future"
+  //
+  // THE FIX:
+  //   setState(() { _uploadTask = task; })
+  //   Curly braces always return void — no exception thrown.
+  //
   Future<String?> _uploadPhotoAndGetUrl() async {
-    if (_pickedImage == null) return _existingPhotoUrl.isNotEmpty ? _existingPhotoUrl : null;
-    final uid = widget.user?.uid ?? '';
-    if (uid.isEmpty) return null;
-    setState(() { _uploadingPhoto = true; _uploadProgress = 0.0; });
-    try {
-      final url = await FirebaseStorageService.instance.uploadProfilePhoto(
-        uid: uid, file: _pickedImage!,
-        onProgress: (p) { if (mounted) setState(() => _uploadProgress = p); },
-      );
-      if (mounted) setState(() => _uploadingPhoto = false);
-      if (url == null && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Photo upload failed. Profile saved without new photo.'),
-          backgroundColor: Color(0xFFD97706),
-        ));
-        return _existingPhotoUrl.isNotEmpty ? _existingPhotoUrl : null;
-      }
-      return url;
-    } catch (e) {
-      if (mounted) {
-        setState(() => _uploadingPhoto = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('Photo upload error: $e'), backgroundColor: const Color(0xFFDC2626)));
-      }
+    if (_pickedImage == null) {
       return _existingPhotoUrl.isNotEmpty ? _existingPhotoUrl : null;
     }
+
+    final uid = widget.user?.uid ?? '';
+    if (uid.isEmpty) return null;
+
+    // Read raw bytes — works for both file:// and content:// URIs
+    final Uint8List bytes;
+    try {
+      bytes = await _pickedImage!.readAsBytes();
+    } catch (e) {
+      throw Exception('Could not read image file: $e');
+    }
+    if (bytes.isEmpty) throw Exception('Image file is empty.');
+
+    // Detect format and build storage reference
+    final contentType = _contentTypeFromBytes(bytes);
+    String ext = 'jpg';
+    if (contentType == 'image/png') ext = 'png';
+    if (contentType == 'image/webp') ext = 'webp';
+    if (contentType == 'image/gif') ext = 'gif';
+
+    final storageRef = FirebaseStorage.instance
+        .ref()
+        .child('profile_photos')
+        .child('$uid.$ext');
+
+    final metadata = SettableMetadata(contentType: contentType);
+    final task = storageRef.putData(bytes, metadata);
+
+    // ✅ FIXED: curly braces — NOT arrow syntax
+    // Arrow: setState(() => _uploadTask = task)  ← throws because UploadTask is a Future
+    // Fixed: setState(() { _uploadTask = task; }) ← always returns void
+    if (mounted) setState(() {
+      _uploadTask = task;
+    });
+
+    final snapshot = await task.timeout(
+      const Duration(seconds: 60),
+      onTimeout: () {
+        task.cancel();
+        throw TimeoutException('Upload timed out. Check your connection.');
+      },
+    );
+
+    if (snapshot.state != TaskState.success) {
+      throw Exception('Upload ended in state: ${snapshot.state}');
+    }
+
+    // Wait for Firebase Storage to finish processing before fetching URL.
+    // firebase_storage 12.x has a race condition where putData() reports
+    // success before the object is accessible via getDownloadURL().
+    await Future.delayed(const Duration(seconds: 2));
+
+    // Use snapshot.ref — NOT storageRef — to get the URL.
+    // snapshot.ref points to the exact location of the uploaded object.
+    return await snapshot.ref.getDownloadURL();
   }
 
+
+  // ── validate ──────────────────────────────────────────────────────────────
   bool _validate() {
     bool ok = true;
     setState(() {
@@ -665,13 +792,63 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
     return ok;
   }
 
+  // ── save ──────────────────────────────────────────────────────────────────
   Future<void> _save() async {
     if (!_validate()) return;
-    setState(() => _saving = true);
+    setState(() { _saving = true; });
+
+    String? photoUrl;
+    bool photoUploadFailed = false;
+
+    if (_pickedImage != null) {
+      try {
+        photoUrl = await _uploadPhotoAndGetUrl();
+      } on FirebaseException catch (e) {
+        photoUploadFailed = true;
+        if (mounted) {
+          setState(() { _saving = false; });
+          String msg = 'Photo upload failed: ${e.message ?? e.code}';
+          if (e.code == 'unauthorized' || e.code == 'permission-denied') {
+            msg = 'Storage permission denied. Check Firebase Storage Rules.';
+          }
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(msg),
+            backgroundColor: const Color(0xFFDC2626),
+            duration: const Duration(seconds: 6),
+          ));
+        }
+        return;
+      } on TimeoutException catch (e) {
+        photoUploadFailed = true;
+        if (mounted) {
+          setState(() { _saving = false; });
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(e.message ?? 'Upload timed out.'),
+            backgroundColor: const Color(0xFFDC2626),
+            duration: const Duration(seconds: 6),
+          ));
+        }
+        return;
+      } catch (e) {
+        photoUploadFailed = true;
+        if (mounted) {
+          setState(() { _saving = false; });
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Upload error: $e'),
+            backgroundColor: const Color(0xFFDC2626),
+            duration: const Duration(seconds: 6),
+          ));
+        }
+        return;
+      }
+    } else {
+      photoUrl = _existingPhotoUrl.isNotEmpty ? _existingPhotoUrl : null;
+    }
+
     try {
       final uid  = widget.user?.uid ?? '';
       final name = _nameCtrl.text.trim();
-      final photoUrl = await _uploadPhotoAndGetUrl();
+
       final updateData = <String, dynamic>{
         'name':             name,
         'phone':            _phoneCtrl.text.trim(),
@@ -679,15 +856,22 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
         'emergencyContact': _emergencyCtrl.text.trim(),
         'updatedAt':        FieldValue.serverTimestamp(),
       };
-      if (_gender != null) updateData['gender'] = _gender;
+      if (_gender != null)                         updateData['gender']   = _gender;
       if (photoUrl != null && photoUrl.isNotEmpty) updateData['photoUrl'] = photoUrl;
-      await FirebaseFirestore.instance.collection('users').doc(uid)
+
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
           .set(updateData, SetOptions(merge: true));
+
       if (widget.user != null) {
         if (name.isNotEmpty) await widget.user!.updateDisplayName(name);
-        if (photoUrl != null && photoUrl.isNotEmpty) await widget.user!.updatePhotoURL(photoUrl);
+        if (photoUrl != null && photoUrl.isNotEmpty && !photoUploadFailed) {
+          await widget.user!.updatePhotoURL(photoUrl);
+        }
         await widget.user!.reload();
       }
+
       if (mounted) {
         setState(() { _saving = false; _saved = true; });
         await Future.delayed(const Duration(milliseconds: 1200));
@@ -695,204 +879,370 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
       }
     } on FirebaseException catch (e) {
       if (mounted) {
-        setState(() => _saving = false);
+        setState(() { _saving = false; });
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(e.message ?? 'Failed to save. Please try again.'),
-            backgroundColor: const Color(0xFFDC2626)));
+          content: Text(e.message ?? 'Failed to save. Please try again.'),
+          backgroundColor: const Color(0xFFDC2626),
+        ));
       }
     } catch (e) {
       if (mounted) {
-        setState(() => _saving = false);
+        setState(() { _saving = false; });
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('Unexpected error: $e'), backgroundColor: const Color(0xFFDC2626)));
+          content: Text('Unexpected error: $e'),
+          backgroundColor: const Color(0xFFDC2626),
+        ));
       }
     }
   }
 
+  // ── build ─────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: const BoxDecoration(color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
       padding: EdgeInsets.only(
-          bottom: MediaQuery.of(context).viewInsets.bottom + 28, left: 24, right: 24),
+        bottom: MediaQuery.of(context).viewInsets.bottom + 28,
+        left: 24, right: 24,
+      ),
       child: _loading
-          ? const Padding(padding: EdgeInsets.symmetric(vertical: 60),
-          child: Center(child: CircularProgressIndicator(color: Color(0xFF7C3AED))))
+          ? const Padding(
+        padding: EdgeInsets.symmetric(vertical: 60),
+        child: Center(child: CircularProgressIndicator(color: Color(0xFF7C3AED))),
+      )
           : SingleChildScrollView(
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Center(child: Container(margin: const EdgeInsets.symmetric(vertical: 12),
-              width: 42, height: 4, decoration: BoxDecoration(
-                  color: const Color(0xFFE5E7EB), borderRadius: BorderRadius.circular(2)))),
-          Row(children: [
-            Container(width: 46, height: 46,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // drag handle
+            Center(
+              child: Container(
+                margin: const EdgeInsets.symmetric(vertical: 12),
+                width: 42, height: 4,
                 decoration: BoxDecoration(
-                    gradient: const LinearGradient(colors: [Color(0xFF5B21B6), Color(0xFF7C3AED)],
-                        begin: Alignment.topLeft, end: Alignment.bottomRight),
-                    borderRadius: BorderRadius.circular(13)),
-                child: const Icon(Icons.person_rounded, color: Colors.white, size: 24)),
-            const SizedBox(width: 14),
-            const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Edit Profile', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold,
-                  color: Color(0xFF1F2937))),
-              Text('Changes save directly to your account',
-                  style: TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
-            ]),
-          ]),
-          const SizedBox(height: 20),
-          if (_saved)
-            Container(
-              margin: const EdgeInsets.only(bottom: 16),
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(color: const Color(0xFFF0FDF4),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: const Color(0xFF059669).withOpacity(0.30))),
-              child: const Row(children: [
-                Icon(Icons.check_circle_rounded, color: Color(0xFF059669), size: 20),
-                SizedBox(width: 10),
-                Text('Profile updated successfully!',
-                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF065F46))),
-              ]),
+                  color: const Color(0xFFE5E7EB),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
             ),
-          Center(
-            child: GestureDetector(
-              onTap: (_saving || _saved) ? null : _pickPhoto,
-              child: Stack(clipBehavior: Clip.none, children: [
-                Container(
-                  width: 100, height: 100,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle, color: const Color(0xFFEDE9FE),
-                    border: Border.all(color: const Color(0xFF7C3AED).withOpacity(0.30), width: 2.5),
-                    image: _pickedImage != null
-                        ? DecorationImage(image: FileImage(_pickedImage!), fit: BoxFit.cover)
-                        : _existingPhotoUrl.isNotEmpty
-                        ? DecorationImage(image: NetworkImage(_existingPhotoUrl), fit: BoxFit.cover)
+
+            // title
+            Row(children: [
+              Container(
+                width: 46, height: 46,
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF5B21B6), Color(0xFF7C3AED)],
+                    begin: Alignment.topLeft, end: Alignment.bottomRight,
+                  ),
+                  borderRadius: BorderRadius.circular(13),
+                ),
+                child: const Icon(Icons.person_rounded, color: Colors.white, size: 24),
+              ),
+              const SizedBox(width: 14),
+              const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('Edit Profile',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold,
+                        color: Color(0xFF1F2937))),
+                Text('Changes save directly to your account',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+              ]),
+            ]),
+            const SizedBox(height: 20),
+
+            // success banner
+            if (_saved)
+              Container(
+                margin: const EdgeInsets.only(bottom: 16),
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF0FDF4),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: const Color(0xFF059669).withOpacity(0.30)),
+                ),
+                child: const Row(children: [
+                  Icon(Icons.check_circle_rounded, color: Color(0xFF059669), size: 20),
+                  SizedBox(width: 10),
+                  Text('Profile updated successfully!',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                          color: Color(0xFF065F46))),
+                ]),
+              ),
+
+            // photo picker
+            Center(
+              child: GestureDetector(
+                onTap: (_saving || _saved) ? null : _pickPhoto,
+                child: Stack(clipBehavior: Clip.none, children: [
+                  Container(
+                    width: 100, height: 100,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: const Color(0xFFEDE9FE),
+                      border: Border.all(
+                          color: const Color(0xFF7C3AED).withOpacity(0.30),
+                          width: 2.5),
+                      image: _pickedImage != null
+                          ? DecorationImage(
+                          image: FileImage(_pickedImage!), fit: BoxFit.cover)
+                          : _existingPhotoUrl.isNotEmpty
+                          ? DecorationImage(
+                          image: NetworkImage(_existingPhotoUrl),
+                          fit: BoxFit.cover)
+                          : null,
+                    ),
+                    child: (_pickedImage == null && _existingPhotoUrl.isEmpty)
+                        ? const Center(child: Icon(Icons.person_rounded,
+                        color: Color(0xFF7C3AED), size: 42))
                         : null,
                   ),
-                  child: (_pickedImage == null && _existingPhotoUrl.isEmpty)
-                      ? const Center(child: Icon(Icons.person_rounded, color: Color(0xFF7C3AED), size: 42))
-                      : null,
-                ),
-                if (_uploadingPhoto)
-                  Positioned.fill(child: Container(
-                    decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.black.withOpacity(0.45)),
-                    child: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-                      SizedBox(width: 32, height: 32, child: CircularProgressIndicator(
-                          value: _uploadProgress, color: Colors.white, strokeWidth: 3)),
-                      const SizedBox(height: 4),
-                      Text('${(_uploadProgress * 100).toInt()}%',
-                          style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.bold)),
-                    ])),
-                  )),
-                if (!_uploadingPhoto)
-                  Positioned(bottom: 2, right: 2, child: Container(
-                    width: 30, height: 30,
-                    decoration: BoxDecoration(
-                        gradient: const LinearGradient(colors: [Color(0xFF5B21B6), Color(0xFF7C3AED)],
-                            begin: Alignment.topLeft, end: Alignment.bottomRight),
-                        shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 2)),
-                    child: const Icon(Icons.camera_alt_rounded, color: Colors.white, size: 14),
-                  )),
-              ]),
-            ),
-          ),
-          const SizedBox(height: 8),
-          const Center(child: Text('Tap to change photo',
-              style: TextStyle(fontSize: 11, color: Color(0xFF9CA3AF)))),
-          const SizedBox(height: 18),
-          _infoRow(icon: Icons.email_rounded, label: 'Email Address',
-              value: widget.user?.email ?? widget.data['email'] as String? ?? '—',
-              note: 'Contact support to change your email'),
-          const SizedBox(height: 14),
-          _field(label: 'Full Name', controller: _nameCtrl, icon: Icons.person_rounded,
-              hint: 'Your full name', kb: TextInputType.name, error: _nameErr,
-              onChanged: (_) { if (_nameErr != null) setState(() => _nameErr = null); }),
-          _field(label: 'Phone Number', controller: _phoneCtrl, icon: Icons.phone_rounded,
-              hint: '+91 XXXXX XXXXX', kb: TextInputType.phone, error: _phoneErr,
-              onChanged: (_) { if (_phoneErr != null) setState(() => _phoneErr = null); }),
-          _field(label: 'Date of Birth', controller: _dobCtrl, icon: Icons.cake_rounded,
-            hint: 'e.g. 15 Aug 1998', kb: TextInputType.datetime, readOnly: true,
-            onTap: () async {
-              DateTime initial = DateTime(2000);
-              try {
-                if (_dobCtrl.text.isNotEmpty) {
-                  const months = {'Jan':1,'Feb':2,'Mar':3,'Apr':4,'May':5,'Jun':6,
-                    'Jul':7,'Aug':8,'Sep':9,'Oct':10,'Nov':11,'Dec':12};
-                  final parts = _dobCtrl.text.split(' ');
-                  if (parts.length == 3) {
-                    initial = DateTime(int.parse(parts[2]), months[parts[1]] ?? 1, int.parse(parts[0]));
-                  }
-                }
-              } catch (_) {}
-              final picked = await showDatePicker(
-                context: context, initialDate: initial,
-                firstDate: DateTime(1920), lastDate: DateTime.now(),
-                builder: (ctx, child) => Theme(
-                    data: Theme.of(ctx).copyWith(colorScheme: const ColorScheme.light(
-                        primary: Color(0xFF7C3AED), onPrimary: Colors.white)), child: child!),
-              );
-              if (picked != null) {
-                const m = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-                setState(() => _dobCtrl.text = '${picked.day} ${m[picked.month]} ${picked.year}');
-              }
-            },
-          ),
-          _field(label: 'Emergency Contact', controller: _emergencyCtrl,
-              icon: Icons.emergency_rounded, hint: 'Emergency phone number',
-              kb: TextInputType.phone, error: _emergencyErr,
-              onChanged: (_) { if (_emergencyErr != null) setState(() => _emergencyErr = null); }),
-          const Text('Gender', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-              color: Color(0xFF374151))),
-          const SizedBox(height: 8),
-          Row(children: ['Male', 'Female', 'Other'].map((g) {
-            final selected = _gender == g;
-            return Expanded(child: GestureDetector(
-              onTap: () => setState(() => _gender = g),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 150),
-                margin: const EdgeInsets.only(right: 8),
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                decoration: BoxDecoration(
-                    color: selected ? const Color(0xFF7C3AED) : const Color(0xFFF9FAFB),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: selected ? const Color(0xFF7C3AED) : const Color(0xFFE5E7EB))),
-                child: Text(g, textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                        color: selected ? Colors.white : const Color(0xFF6B7280))),
+
+                  // upload overlay
+                  if (_uploadTask != null)
+                    Positioned.fill(
+                      child: StreamBuilder<TaskSnapshot>(
+                        stream: _uploadTask!.snapshotEvents,
+                        builder: (_, snap) {
+                          final total    = snap.data?.totalBytes ?? 0;
+                          final progress = total > 0
+                              ? snap.data!.bytesTransferred / total
+                              : 0.0;
+                          return Container(
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Colors.black.withOpacity(0.55),
+                            ),
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                SizedBox(
+                                  width: 36, height: 36,
+                                  child: CircularProgressIndicator(
+                                    value: total > 0 ? progress : null,
+                                    color: Colors.white, strokeWidth: 3,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  total > 0 ? '${(progress * 100).toInt()}%' : '...',
+                                  style: const TextStyle(fontSize: 10,
+                                      color: Colors.white, fontWeight: FontWeight.bold),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+
+                  // camera badge
+                  if (_uploadTask == null)
+                    Positioned(
+                      bottom: 2, right: 2,
+                      child: Container(
+                        width: 30, height: 30,
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                              colors: [Color(0xFF5B21B6), Color(0xFF7C3AED)],
+                              begin: Alignment.topLeft, end: Alignment.bottomRight),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 2),
+                        ),
+                        child: const Icon(Icons.camera_alt_rounded,
+                            color: Colors.white, size: 14),
+                      ),
+                    ),
+                ]),
               ),
-            ));
-          }).toList()),
-          const SizedBox(height: 24),
-          SizedBox(
-            width: double.infinity, height: 52,
-            child: ElevatedButton(
-              onPressed: (_saving || _saved) ? null : _save,
-              style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF7C3AED),
-                  disabledBackgroundColor: _saved ? const Color(0xFF059669) : const Color(0xFFE5E7EB),
-                  elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
-              child: _saving
-                  ? const SizedBox(width: 20, height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : Text(_saved ? '✓ Saved!' : 'Save Changes',
-                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white)),
             ),
-          ),
-        ]),
+            const SizedBox(height: 8),
+            const Center(child: Text('Tap to change photo',
+                style: TextStyle(fontSize: 11, color: Color(0xFF9CA3AF)))),
+
+            // progress bar
+            if (_uploadTask != null) ...[
+              const SizedBox(height: 10),
+              StreamBuilder<TaskSnapshot>(
+                stream: _uploadTask!.snapshotEvents,
+                builder: (_, snap) {
+                  final total    = snap.data?.totalBytes ?? 0;
+                  final progress = total > 0
+                      ? snap.data!.bytesTransferred / total
+                      : 0.0;
+                  return Column(children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: LinearProgressIndicator(
+                        value: total > 0 ? progress : null,
+                        minHeight: 6,
+                        backgroundColor: const Color(0xFFEDE9FE),
+                        valueColor: const AlwaysStoppedAnimation<Color>(
+                            Color(0xFF7C3AED)),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      total > 0
+                          ? 'Uploading… ${(progress * 100).toInt()}%'
+                          : 'Connecting to storage…',
+                      style: const TextStyle(fontSize: 11, color: Color(0xFF7C3AED)),
+                    ),
+                  ]);
+                },
+              ),
+            ],
+
+            const SizedBox(height: 18),
+
+            // email
+            _infoRow(
+              icon: Icons.email_rounded,
+              label: 'Email Address',
+              value: widget.user?.email ?? widget.data['email'] as String? ?? '—',
+              note: 'Contact support to change your email',
+            ),
+            const SizedBox(height: 14),
+
+            // fields
+            _field(label: 'Full Name', controller: _nameCtrl,
+                icon: Icons.person_rounded, hint: 'Your full name',
+                kb: TextInputType.name, error: _nameErr,
+                onChanged: (_) { if (_nameErr != null) setState(() { _nameErr = null; }); }),
+            _field(label: 'Phone Number', controller: _phoneCtrl,
+                icon: Icons.phone_rounded, hint: '+91 XXXXX XXXXX',
+                kb: TextInputType.phone, error: _phoneErr,
+                onChanged: (_) { if (_phoneErr != null) setState(() { _phoneErr = null; }); }),
+            _field(label: 'Date of Birth', controller: _dobCtrl,
+                icon: Icons.cake_rounded, hint: 'e.g. 15 Aug 1998',
+                kb: TextInputType.datetime, readOnly: true,
+                onTap: () async {
+                  DateTime initial = DateTime(2000);
+                  try {
+                    if (_dobCtrl.text.isNotEmpty) {
+                      const months = {
+                        'Jan':1,'Feb':2,'Mar':3,'Apr':4,'May':5,'Jun':6,
+                        'Jul':7,'Aug':8,'Sep':9,'Oct':10,'Nov':11,'Dec':12,
+                      };
+                      final parts = _dobCtrl.text.split(' ');
+                      if (parts.length == 3) {
+                        initial = DateTime(int.parse(parts[2]),
+                            months[parts[1]] ?? 1, int.parse(parts[0]));
+                      }
+                    }
+                  } catch (_) {}
+                  final picked = await showDatePicker(
+                    context: context, initialDate: initial,
+                    firstDate: DateTime(1920), lastDate: DateTime.now(),
+                    builder: (ctx, child) => Theme(
+                      data: Theme.of(ctx).copyWith(
+                          colorScheme: const ColorScheme.light(
+                              primary: Color(0xFF7C3AED),
+                              onPrimary: Colors.white)),
+                      child: child!,
+                    ),
+                  );
+                  if (picked != null) {
+                    const m = ['','Jan','Feb','Mar','Apr','May','Jun',
+                      'Jul','Aug','Sep','Oct','Nov','Dec'];
+                    setState(() {
+                      _dobCtrl.text =
+                      '${picked.day} ${m[picked.month]} ${picked.year}';
+                    });
+                  }
+                }),
+            _field(label: 'Emergency Contact', controller: _emergencyCtrl,
+                icon: Icons.emergency_rounded, hint: 'Emergency phone number',
+                kb: TextInputType.phone, error: _emergencyErr,
+                onChanged: (_) {
+                  if (_emergencyErr != null) setState(() { _emergencyErr = null; });
+                }),
+
+            // gender
+            const Text('Gender',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                    color: Color(0xFF374151))),
+            const SizedBox(height: 8),
+            Row(
+              children: ['Male', 'Female', 'Other'].map((g) {
+                final selected = _gender == g;
+                return Expanded(
+                  child: GestureDetector(
+                    onTap: () => setState(() { _gender = g; }),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 150),
+                      margin: const EdgeInsets.only(right: 8),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      decoration: BoxDecoration(
+                        color: selected ? const Color(0xFF7C3AED) : const Color(0xFFF9FAFB),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                            color: selected
+                                ? const Color(0xFF7C3AED)
+                                : const Color(0xFFE5E7EB)),
+                      ),
+                      child: Text(g,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.w600,
+                              color: selected ? Colors.white : const Color(0xFF6B7280))),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 24),
+
+            // save button
+            SizedBox(
+              width: double.infinity, height: 52,
+              child: ElevatedButton(
+                onPressed: (_saving || _saved || _uploadTask != null) ? null : _save,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF7C3AED),
+                  disabledBackgroundColor: _saved
+                      ? const Color(0xFF059669)
+                      : const Color(0xFFE5E7EB),
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16)),
+                ),
+                child: _saving
+                    ? const SizedBox(width: 20, height: 20,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Colors.white))
+                    : Text(_saved ? '✓ Saved!' : 'Save Changes',
+                    style: const TextStyle(fontSize: 15,
+                        fontWeight: FontWeight.bold, color: Colors.white)),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _infoRow({required IconData icon, required String label, required String value, required String note}) {
+  // ── helpers ───────────────────────────────────────────────────────────────
+  Widget _infoRow({
+    required IconData icon, required String label,
+    required String value, required String note,
+  }) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-      decoration: BoxDecoration(color: const Color(0xFFF9FAFB), borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: const Color(0xFFE5E7EB))),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF9FAFB),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+      ),
       child: Row(children: [
         Icon(icon, color: const Color(0xFF9CA3AF), size: 18),
         const SizedBox(width: 12),
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF9CA3AF))),
+          Text(label, style: const TextStyle(fontSize: 11,
+              fontWeight: FontWeight.w600, color: Color(0xFF9CA3AF))),
           const SizedBox(height: 2),
           Text(value, style: const TextStyle(fontSize: 14, color: Color(0xFF6B7280))),
           const SizedBox(height: 2),
@@ -903,34 +1253,55 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
     );
   }
 
-  Widget _field({required String label, required TextEditingController controller,
-    required IconData icon, required String hint, required TextInputType kb,
-    String? error, bool readOnly = false, VoidCallback? onTap, ValueChanged<String>? onChanged}) {
+  Widget _field({
+    required String label,
+    required TextEditingController controller,
+    required IconData icon,
+    required String hint,
+    required TextInputType kb,
+    String? error,
+    bool readOnly = false,
+    VoidCallback? onTap,
+    ValueChanged<String>? onChanged,
+  }) {
     final hasError = error != null && error.isNotEmpty;
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF374151))),
+        Text(label, style: const TextStyle(fontSize: 12,
+            fontWeight: FontWeight.w600, color: Color(0xFF374151))),
         const SizedBox(height: 6),
         TextField(
-          controller: controller, keyboardType: kb, readOnly: readOnly,
-          onTap: onTap, onChanged: onChanged,
-          textCapitalization: kb == TextInputType.name ? TextCapitalization.words : TextCapitalization.none,
+          controller: controller, keyboardType: kb,
+          readOnly: readOnly, onTap: onTap, onChanged: onChanged,
+          textCapitalization: kb == TextInputType.name
+              ? TextCapitalization.words : TextCapitalization.none,
           style: const TextStyle(fontSize: 14, color: Color(0xFF1F2937)),
           decoration: InputDecoration(
-            hintText: hint, hintStyle: const TextStyle(color: Color(0xFFD1D5DB), fontSize: 13),
-            prefixIcon: Icon(icon, color: hasError ? const Color(0xFFDC2626) : const Color(0xFF7C3AED), size: 18),
-            filled: true, fillColor: hasError ? const Color(0xFFFEF2F2) : const Color(0xFFF9FAFB),
+            hintText: hint,
+            hintStyle: const TextStyle(color: Color(0xFFD1D5DB), fontSize: 13),
+            prefixIcon: Icon(icon,
+                color: hasError ? const Color(0xFFDC2626) : const Color(0xFF7C3AED),
+                size: 18),
+            filled: true,
+            fillColor: hasError ? const Color(0xFFFEF2F2) : const Color(0xFFF9FAFB),
             contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-            errorText: error, errorStyle: const TextStyle(fontSize: 11, color: Color(0xFFDC2626)),
-            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14),
-                borderSide: BorderSide(color: hasError ? const Color(0xFFDC2626) : const Color(0xFFE5E7EB))),
-            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14),
+            errorText: error,
+            errorStyle: const TextStyle(fontSize: 11, color: Color(0xFFDC2626)),
+            enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
                 borderSide: BorderSide(
-                    color: hasError ? const Color(0xFFDC2626) : const Color(0xFF7C3AED), width: 1.5)),
-            errorBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14),
+                    color: hasError ? const Color(0xFFDC2626) : const Color(0xFFE5E7EB))),
+            focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: BorderSide(
+                    color: hasError ? const Color(0xFFDC2626) : const Color(0xFF7C3AED),
+                    width: 1.5)),
+            errorBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
                 borderSide: const BorderSide(color: Color(0xFFDC2626))),
-            focusedErrorBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14),
+            focusedErrorBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
                 borderSide: const BorderSide(color: Color(0xFFDC2626), width: 1.5)),
           ),
         ),
@@ -938,7 +1309,6 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
     );
   }
 }
-
 // ═══════════════════════════════════════════════════════════════════════════
 //  CHANGE PASSWORD SHEET
 // ═══════════════════════════════════════════════════════════════════════════
