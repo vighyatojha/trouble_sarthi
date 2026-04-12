@@ -41,7 +41,7 @@ class _AboutScreenState extends State<AboutScreen>
     )..forward();
 
     // Lightweight opacity-only stagger — avoids SlideTransition jank on scroll
-    _fades = List.generate(7, (i) {
+    _fades = List.generate(8, (i) {
       final start = (i * 0.12).clamp(0.0, 0.8);
       final end = (start + 0.35).clamp(0.0, 1.0);
       return Tween<double>(begin: 0, end: 1).animate(
@@ -106,9 +106,25 @@ class _AboutScreenState extends State<AboutScreen>
                   const SizedBox(height: 12),
 
                   // ── Helper-to-User ratings feed ──────────────────
+                  // ── Helper-to-User ratings feed ──────────────────
                   _FadeIn(
                     animation: _fades[3],
                     child: const _HelperRatingsFeed(),
+                  ),
+
+                  const SizedBox(height: 28),
+                  _sectionLabel('REVIEW HISTORY'),
+                  const SizedBox(height: 4),
+                  _FadeIn(
+                    animation: _fades[2],
+                    child: const _SectionSubtitle(
+                      'Reviews you gave helpers and reviews helpers gave you.',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  _FadeIn(
+                    animation: _fades[7],
+                    child: const _ReviewHistoryBentoGrid(),
                   ),
 
                   const SizedBox(height: 28),
@@ -1425,6 +1441,7 @@ class MutualReviewSheet extends StatefulWidget {
   // ── Set to true to pre-fill with demo data for team presentations.
   // ── Remove or set false before production release.
   final bool demoMode;
+  final VoidCallback? onAfterClose;
 
   const MutualReviewSheet._({
     required this.bookingId,
@@ -1433,6 +1450,7 @@ class MutualReviewSheet extends StatefulWidget {
     required this.serviceName,
     required this.role,
     this.demoMode = false,
+    this.onAfterClose,
   });
 
   static Future<void> showForUser(
@@ -1441,7 +1459,8 @@ class MutualReviewSheet extends StatefulWidget {
         required String helperId,
         required String helperName,
         required String serviceName,
-        bool demoMode = false, // ← pass true when demoing to team
+        bool demoMode = false,
+        VoidCallback? onAfterClose,
       }) {
     return showModalBottomSheet(
       context: context,
@@ -1457,6 +1476,7 @@ class MutualReviewSheet extends StatefulWidget {
         serviceName: serviceName,
         role: _ReviewerRole.user,
         demoMode: demoMode,
+        onAfterClose: onAfterClose,
       ),
     );
   }
@@ -1467,7 +1487,8 @@ class MutualReviewSheet extends StatefulWidget {
         required String userId,
         required String userName,
         required String serviceName,
-        bool demoMode = false, // ← pass true when demoing to team
+        bool demoMode = false,
+        VoidCallback? onAfterClose,
       }) {
     return showModalBottomSheet(
       context: context,
@@ -1483,6 +1504,7 @@ class MutualReviewSheet extends StatefulWidget {
         serviceName: serviceName,
         role: _ReviewerRole.helper,
         demoMode: demoMode,
+        onAfterClose: onAfterClose,
       ),
     );
   }
@@ -1603,6 +1625,7 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
           'status': 'completed',
           'completedAt': FieldValue.serverTimestamp(),
           'userRating': _starRating,
+          'userReviewDone': true,
           if (note.isNotEmpty) 'userReview': note,
         };
 
@@ -1667,6 +1690,7 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
       }
 
       // ── Firestore notification ────────────────────────────────────────────
+      // ── Firestore notification ────────────────────────────────────────────
       if (isUserRole) {
         final currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
         await FirebaseFirestore.instance
@@ -1681,6 +1705,44 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
           'rating':    0,
           'read':      false,
           'createdAt': FieldValue.serverTimestamp(),
+        });
+      }
+
+      // ── Write 1: helpers/{helperId}/reviews subcollection ─────────────────
+      if (isUserRole) {
+        await FirebaseFirestore.instance
+            .collection('helpers')
+            .doc(widget.revieweeId)
+            .collection('reviews')
+            .add({
+          'bookingId':   widget.bookingId,
+          'userId':      reviewerId,
+          'userName':    FirebaseAuth.instance.currentUser?.displayName ?? 'User',
+          'serviceName': widget.serviceName,
+          'starRating':  _starRating,
+          'answers':     _answers.map((k, v) =>
+              MapEntry(_questions[k].question, _questions[k].options[v])),
+          if (_noteController.text.trim().isNotEmpty)
+            'additionalNote': _noteController.text.trim(),
+          'createdAt':   FieldValue.serverTimestamp(),
+        });
+      }
+
+      // ── Write 2: users/{reviewerId}/reviewsGiven subcollection ────────────
+      if (isUserRole) {
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(reviewerId)
+            .collection('reviewsGiven')
+            .add({
+          'bookingId':   widget.bookingId,
+          'helperId':    widget.revieweeId,
+          'helperName':  widget.revieweeName,
+          'serviceName': widget.serviceName,
+          'starRating':  _starRating,
+          'answers':     _answers.map((k, v) =>
+              MapEntry(_questions[k].question, _questions[k].options[v])),
+          'createdAt':   FieldValue.serverTimestamp(),
         });
       }
 
@@ -1724,6 +1786,7 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
               await RealtimeDbService.instance.deleteChat(chatId);
             }
             if (context.mounted) Navigator.pop(context);
+            widget.onAfterClose?.call();
           },
         )
             : _step == 1
@@ -2495,6 +2558,412 @@ class _DoneView extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REVIEW HISTORY BENTO GRID  (Change C)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum _BentoCardSize { large, medium, small }
+
+class _BentoReviewCard extends StatelessWidget {
+  final Map<String, dynamic> data;
+  final _BentoCardSize size;
+  final Color accentColor;
+  final bool isGiven; // true = review given to helper, false = received from helper
+
+  const _BentoReviewCard({
+    super.key,
+    required this.data,
+    required this.size,
+    required this.accentColor,
+    required this.isGiven,
+  });
+
+  String _relTime(DateTime dt) {
+    final diff = DateTime.now().difference(dt);
+    if (diff.inMinutes < 1) return 'Just now';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+    if (diff.inHours < 24) return '${diff.inHours}h ago';
+    if (diff.inDays == 1) return 'Yesterday';
+    if (diff.inDays < 30) return '${diff.inDays}d ago';
+    return '${dt.day}/${dt.month}/${dt.year}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final name = isGiven
+        ? (data['helperName'] as String? ?? 'Helper')
+        : (data['reviewerName'] as String? ??
+        data['revieweeName'] as String? ??
+        'Helper');
+
+    final stars = (data['starRating'] as int?) ?? 0;
+    final service = data['serviceName'] as String? ?? '';
+    final answers = (data['answers'] as Map<String, dynamic>? ?? {});
+    final ts = data['createdAt'] as Timestamp?;
+
+    final double avatarSize = size == _BentoCardSize.large
+        ? 40
+        : size == _BentoCardSize.medium
+        ? 32
+        : 28;
+
+    final avatarBg =
+    isGiven ? const Color(0xFFEDE9FE) : const Color(0xFFCCFBF1);
+    final avatarFg =
+    isGiven ? const Color(0xFF7C3AED) : const Color(0xFF0D9488);
+
+    // Pill answers — exclude "book/accept again" question, cap by size
+    final pillAnswers = answers.entries
+        .where((e) =>
+    !e.key.toLowerCase().contains('book') &&
+        !e.key.toLowerCase().contains('accept'))
+        .take(size == _BentoCardSize.large ? 2 : 1)
+        .toList();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFF0F0F5)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // ── Avatar + name + stars ──────────────────────────────────
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: avatarSize,
+                height: avatarSize,
+                decoration:
+                BoxDecoration(color: avatarBg, shape: BoxShape.circle),
+                child: Center(
+                  child: Text(
+                    name.isNotEmpty ? name[0].toUpperCase() : '?',
+                    style: TextStyle(
+                      fontSize: size == _BentoCardSize.large ? 16 : 12,
+                      fontWeight: FontWeight.bold,
+                      color: avatarFg,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: size == _BentoCardSize.small ? 12 : 13,
+                        fontWeight: FontWeight.bold,
+                        color: const Color(0xFF1F2937),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Row(
+                      children: [
+                        ...List.generate(
+                          5,
+                              (i) => Icon(
+                            Icons.star_rounded,
+                            size: 12,
+                            color: i < stars
+                                ? const Color(0xFFFBBF24)
+                                : const Color(0xFFE5E7EB),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          '$stars.0',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFFFBBF24),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+
+          // ── Medium / Large extras ──────────────────────────────────
+          if (size != _BentoCardSize.small) ...[
+            if (service.isNotEmpty) ...[
+              const SizedBox(height: 5),
+              Text(
+                service,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                    fontSize: 11, color: Color(0xFF9CA3AF)),
+              ),
+            ],
+            if (pillAnswers.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 4,
+                runSpacing: 4,
+                children: pillAnswers
+                    .map(
+                      (e) => Container(
+                    constraints: const BoxConstraints(maxWidth: 130),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: accentColor.withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                          color: accentColor.withOpacity(0.18)),
+                    ),
+                    child: Text(
+                      e.value.toString(),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                  ),
+                )
+                    .toList(),
+              ),
+            ],
+            if (ts != null) ...[
+              const SizedBox(height: 5),
+              Text(
+                _relTime(ts.toDate()),
+                style: const TextStyle(
+                    fontSize: 10, color: Color(0xFFB0B8CC)),
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ReviewHistoryBentoGrid extends StatelessWidget {
+  const _ReviewHistoryBentoGrid();
+
+  @override
+  Widget build(BuildContext context) {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // ── Section A: reviews given by user ──────────────────────
+        StreamBuilder<QuerySnapshot>(
+          stream: FirebaseFirestore.instance
+              .collection('users')
+              .doc(uid)
+              .collection('reviewsGiven')
+              .orderBy('createdAt', descending: true)
+              .limit(6)
+              .snapshots(),
+          builder: (context, snap) {
+            final dataList = (snap.data?.docs ?? [])
+                .map((d) => d.data() as Map<String, dynamic>)
+                .toList();
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'REVIEWS YOU GAVE',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF9CA3AF),
+                    letterSpacing: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _buildBentoSection(
+                  dataList,
+                  const Color(0xFF7C3AED),
+                  isGiven: true,
+                ),
+              ],
+            );
+          },
+        ),
+
+        const SizedBox(height: 24),
+
+        // ── Section B: reviews received from helpers ───────────────
+        StreamBuilder<QuerySnapshot>(
+          stream: FirebaseFirestore.instance
+              .collectionGroup('helper_to_user')
+              .where('revieweeId', isEqualTo: uid)
+              .orderBy('createdAt', descending: true)
+              .limit(6)
+              .snapshots(),
+          builder: (context, snap) {
+            final dataList = (snap.data?.docs ?? [])
+                .map((d) => d.data() as Map<String, dynamic>)
+                .toList();
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'REVIEWS YOU RECEIVED',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF9CA3AF),
+                    letterSpacing: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _buildBentoSection(
+                  dataList,
+                  const Color(0xFF0D9488),
+                  isGiven: false,
+                ),
+              ],
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _buildBentoSection(
+      List<Map<String, dynamic>> docs,
+      Color accent, {
+        required bool isGiven,
+      }) {
+    if (docs.isEmpty) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: const Color(0xFFF0F0F5)),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.star_outline_rounded,
+                color: accent.withOpacity(0.4), size: 20),
+            const SizedBox(width: 10),
+            const Text(
+              'No reviews yet',
+              style: TextStyle(fontSize: 13, color: Color(0xFF9CA3AF)),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (docs.length <= 2) {
+      return Column(
+        children: docs
+            .map(
+              (d) => Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: _BentoReviewCard(
+              data: d,
+              size: _BentoCardSize.large,
+              accentColor: accent,
+              isGiven: isGiven,
+            ),
+          ),
+        )
+            .toList(),
+      );
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final maxW = constraints.maxWidth;
+        return Column(
+          children: [
+            // First card — large, full width
+            SizedBox(
+              height: 130,
+              child: _BentoReviewCard(
+                data: docs[0],
+                size: _BentoCardSize.large,
+                accentColor: accent,
+                isGiven: isGiven,
+              ),
+            ),
+            const SizedBox(height: 8),
+            // Second row — 2 medium cards side by side
+            Row(
+              children: [
+                SizedBox(
+                  width: (maxW - 8) / 2,
+                  height: 100,
+                  child: _BentoReviewCard(
+                    data: docs[1],
+                    size: _BentoCardSize.medium,
+                    accentColor: accent,
+                    isGiven: isGiven,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: (maxW - 8) / 2,
+                  height: 100,
+                  child: _BentoReviewCard(
+                    data: docs[2],
+                    size: _BentoCardSize.medium,
+                    accentColor: accent,
+                    isGiven: isGiven,
+                  ),
+                ),
+              ],
+            ),
+            if (docs.length > 3) ...[
+              const SizedBox(height: 8),
+              // Remaining — small cards in Wrap
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: docs
+                    .sublist(3)
+                    .map(
+                      (d) => SizedBox(
+                    width: (maxW - 16) / 3,
+                    height: 88,
+                    child: _BentoReviewCard(
+                      data: d,
+                      size: _BentoCardSize.small,
+                      accentColor: accent,
+                      isGiven: isGiven,
+                    ),
+                  ),
+                )
+                    .toList(),
+              ),
+            ],
+          ],
+        );
+      },
     );
   }
 }

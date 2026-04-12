@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import '../service/realtime_db_service.dart';
+import 'about_screen.dart';
 import '../service/firestore_service.dart';
 import '../models/location_model.dart';
 
@@ -13,8 +14,7 @@ import '../models/location_model.dart';
 // ─────────────────────────────────────────────────────────────────────────────
 // DATA MODELS
 // ─────────────────────────────────────────────────────────────────────────────
-
-enum BookingStatus { pending, active, completed, cancelled }
+enum BookingStatus { booked, assigned, arrived, inProgress, completed, cancelled }
 
 class BookingModel {
   final String id;
@@ -38,8 +38,11 @@ class BookingModel {
   final String? helperEmployeeId;
   final List<String>? tasksDone;
   final String? helperId;
+  final Map<String, DateTime?> statusTimestamps;
+  final bool paymentConfirmed;
+  final bool userReviewDone;
 
-  const BookingModel({
+    const BookingModel({
     required this.id,
     this.firestoreId = '',
     required this.serviceName,
@@ -61,15 +64,23 @@ class BookingModel {
     this.helperEmployeeId,
     this.tasksDone,
     this.helperId,
+    this.statusTimestamps = const {},
+    this.paymentConfirmed = false,
+    this.userReviewDone = false,
   });
 
   factory BookingModel.fromFirestore(Map<String, dynamic> data, String docId) {
     BookingStatus status;
-    switch (data['status'] as String? ?? 'pending') {
-      case 'active':  status = BookingStatus.active;    break;
-      case 'completed': status = BookingStatus.completed; break;
-      case 'cancelled': status = BookingStatus.cancelled; break;
-      default: status = BookingStatus.pending;
+    switch (data['status'] as String? ?? 'booked') {
+      case 'booked':      status = BookingStatus.booked;      break;
+      case 'assigned':    status = BookingStatus.assigned;    break;
+      case 'arrived':     status = BookingStatus.arrived;     break;
+      case 'inProgress':  status = BookingStatus.inProgress;  break;
+      case 'completed':   status = BookingStatus.completed;   break;
+      case 'cancelled':   status = BookingStatus.cancelled;   break;
+      case 'active':      status = BookingStatus.inProgress;  break; // legacy
+      case 'pending':     status = BookingStatus.booked;      break; // legacy
+      default:            status = BookingStatus.booked;
     }
     final colorVal   = data['serviceColor']   as int? ?? 0xFF7C3AED;
     final bgColorVal = data['serviceBgColor'] as int? ?? 0xFFEDE9FE;
@@ -95,6 +106,12 @@ class BookingModel {
       helperEmployeeId:data['helperEmployeeId'] as String?,
       tasksDone:       (data['tasksDone']     as List<dynamic>?)?.map((e) => e.toString()).toList(),
       helperId:        data['helperId']       as String?,
+      statusTimestamps: () {
+        final rawTs = data['statusTimestamps'] as Map<String, dynamic>? ?? {};
+        return rawTs.map((k, v) => MapEntry(k, v is Timestamp ? v.toDate() : null));
+      }(),
+      paymentConfirmed: data['paymentConfirmed'] as bool? ?? false,
+      userReviewDone:   data['userReviewDone']   as bool? ?? false,
     );
   }
 
@@ -115,10 +132,14 @@ class BookingModel {
     'totalAmount':    totalAmount,
     'helperJobCount': helperJobCount,
     'helperEmployeeId': helperEmployeeId,
-    'tasksDone':      tasksDone,
-    'helperId':       helperId,
-    'userId':         FirebaseAuth.instance.currentUser?.uid,
-    'createdAt':      FieldValue.serverTimestamp(),
+    'tasksDone':        tasksDone,
+    'helperId':         helperId,
+    'statusTimestamps': statusTimestamps.map((k, v) =>
+        MapEntry(k, v != null ? Timestamp.fromDate(v) : null)),
+    'paymentConfirmed': paymentConfirmed,
+    'userReviewDone':   userReviewDone,
+    'userId':           FirebaseAuth.instance.currentUser?.uid,
+    'createdAt':        FieldValue.serverTimestamp(),
   };
 }
 
@@ -186,7 +207,13 @@ class BookingService {
         String userName = 'User',
       }) async {
     try {
-      final ref = await _col.add(booking.toFirestore());
+      final bookingData = booking.toFirestore();
+      bookingData['status'] = 'booked';
+      bookingData['statusTimestamps'] = {'booked': FieldValue.serverTimestamp()};
+      bookingData['paymentConfirmed'] = false;
+      bookingData['userReviewDone'] = false;
+      final ref = await _col.add(bookingData);
+
 
       // ── 1. Create / merge chat document so MessagesScreen can list helpers ──
       if (booking.helperId != null && booking.helperId!.isNotEmpty) {
@@ -635,7 +662,7 @@ final List<BookingModel> _demoBookings = [
     serviceIcon: Icons.water_drop_rounded,
     serviceColor: const Color(0xFF7C3AED),
     serviceBgColor: const Color(0xFFEDE9FE),
-    status: BookingStatus.active,
+    status: BookingStatus.inProgress,
     helperName: 'Ramesh Kumar',
     helperRating: 4.8,
     address: 'B-204, Sunshine Society, Vesu, Surat',
@@ -676,7 +703,7 @@ final List<BookingModel> _demoBookings = [
     serviceIcon: Icons.ac_unit_rounded,
     serviceColor: const Color(0xFF7C3AED),
     serviceBgColor: const Color(0xFFEDE9FE),
-    status: BookingStatus.pending,
+    status: BookingStatus.booked,
     helperName: 'Awaiting Assignment',
     address: 'C-7, Green Park, Katargam, Surat',
     scheduledAt: DateTime.now().add(const Duration(hours: 3)),
@@ -812,8 +839,10 @@ class _BookingsScreenState extends State<BookingsScreen>
 
                   final current = all
                       .where((b) =>
-                  b.status == BookingStatus.active ||
-                      b.status == BookingStatus.pending)
+                  b.status == BookingStatus.booked ||
+                      b.status == BookingStatus.assigned ||
+                      b.status == BookingStatus.arrived ||
+                      b.status == BookingStatus.inProgress)
                       .toList();
                   final completed = all
                       .where(
@@ -910,13 +939,17 @@ class _BookingsHeader extends StatelessWidget {
                       final activeCount = allData.isEmpty
                           ? _demoBookings
                           .where((b) =>
-                      b.status == BookingStatus.active ||
-                          b.status == BookingStatus.pending)
+                      b.status == BookingStatus.booked ||
+                          b.status == BookingStatus.assigned ||
+                          b.status == BookingStatus.arrived ||
+                          b.status == BookingStatus.inProgress)
                           .length
                           : allData
                           .where((b) =>
-                      b.status == BookingStatus.active ||
-                          b.status == BookingStatus.pending)
+                      b.status == BookingStatus.booked ||
+                          b.status == BookingStatus.assigned ||
+                          b.status == BookingStatus.arrived ||
+                          b.status == BookingStatus.inProgress)
                           .length;
                       return Container(
                         padding: const EdgeInsets.symmetric(
@@ -1040,7 +1073,8 @@ class _BookingsList extends StatelessWidget {
         final b = bookings[idx];
         return Padding(
           padding: const EdgeInsets.only(bottom: 14),
-          child: b.status == BookingStatus.active
+          child: (b.status == BookingStatus.inProgress ||
+              b.status == BookingStatus.arrived)
               ? _ActiveBookingCard(booking: b)
               : b.status == BookingStatus.completed
               ? _CompletedBookingCard(booking: b)
@@ -1172,8 +1206,8 @@ class _ActiveBookingCardState extends State<_ActiveBookingCard>
                             Row(children: [
                               _PulseDot(),
                               const SizedBox(width: 6),
-                              const Text('IN PROGRESS',
-                                  style: TextStyle(
+                              Text(_statusLabel(b.status),
+                                  style: const TextStyle(
                                       color: Color(0xFF86EFAC),
                                       fontSize: 10,
                                       fontWeight: FontWeight.bold,
@@ -1239,7 +1273,32 @@ class _ActiveBookingCardState extends State<_ActiveBookingCard>
                             color: Colors.white.withOpacity(0.75),
                             fontSize: 12)),
                   ),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.timeline_rounded,
+                            color: Color(0xFFC4B5FD), size: 12),
+                        const SizedBox(width: 5),
+                        Text(
+                          'Step ${_statusStep(b.status)} of 5  ·  ${_statusLabel(b.status)}',
+                          style: const TextStyle(
+                            color: Color(0xFFC4B5FD),
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 14),
 
                   // ── Row 5: Track Helper + View Details ──────────────────
                   Row(
@@ -1319,6 +1378,535 @@ class _PulseDotState extends State<_PulseDot>
 // PENDING / CANCELLED BOOKING CARD
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// STATUS HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+String _statusLabel(BookingStatus s) {
+  switch (s) {
+    case BookingStatus.booked:     return 'BOOKED';
+    case BookingStatus.assigned:   return 'ASSIGNED';
+    case BookingStatus.arrived:    return 'ARRIVED';
+    case BookingStatus.inProgress: return 'IN PROGRESS';
+    case BookingStatus.completed:  return 'COMPLETED';
+    case BookingStatus.cancelled:  return 'CANCELLED';
+  }
+}
+
+int _statusStep(BookingStatus s) {
+  switch (s) {
+    case BookingStatus.booked:     return 1;
+    case BookingStatus.assigned:   return 2;
+    case BookingStatus.arrived:    return 3;
+    case BookingStatus.inProgress: return 4;
+    case BookingStatus.completed:  return 5;
+    case BookingStatus.cancelled:  return 0;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BOOKING PROGRESS TIMELINE
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _CheckpointConfig {
+  final String key;
+  final String label;
+  final IconData icon;
+  final Color color;
+  const _CheckpointConfig({
+    required this.key,
+    required this.label,
+    required this.icon,
+    required this.color,
+  });
+}
+
+const _kCheckpoints = [
+  _CheckpointConfig(
+    key: 'booked',   label: 'Booked',
+    icon: Icons.check_circle_outline_rounded, color: Color(0xFF7C3AED),
+  ),
+  _CheckpointConfig(
+    key: 'assigned', label: 'Helper Assigned',
+    icon: Icons.person_pin_circle_rounded,    color: Color(0xFF7C3AED),
+  ),
+  _CheckpointConfig(
+    key: 'arrived',  label: 'Helper Arrived',
+    icon: Icons.near_me_rounded,              color: Color(0xFFD97706),
+  ),
+  _CheckpointConfig(
+    key: 'inProgress', label: 'In Progress',
+    icon: Icons.build_circle_rounded,         color: Color(0xFFD97706),
+  ),
+  _CheckpointConfig(
+    key: 'completed', label: 'Completed',
+    icon: Icons.verified_rounded,             color: Color(0xFF059669),
+  ),
+];
+
+const _kStatusOrder = [
+  'booked', 'assigned', 'arrived', 'inProgress', 'completed'
+];
+
+class BookingProgressTimeline extends StatelessWidget {
+  final String currentStatus;
+  final Map<String, DateTime?> statusTimestamps;
+
+  const BookingProgressTimeline({
+    super.key,
+    required this.currentStatus,
+    required this.statusTimestamps,
+  });
+
+  int get _currentIndex {
+    final idx = _kStatusOrder.indexOf(currentStatus);
+    return idx < 0 ? 0 : idx;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ci = _currentIndex;
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFF0F0F5)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.04),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'BOOKING PROGRESS',
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF9CA3AF),
+              letterSpacing: 1.2,
+            ),
+          ),
+          const SizedBox(height: 14),
+          ...List.generate(_kCheckpoints.length, (i) {
+            final cp       = _kCheckpoints[i];
+            final isDone   = i < ci;
+            final isCurrent = i == ci;
+            final isFuture = i > ci;
+            final ts       = statusTimestamps[cp.key];
+            final isLast   = i == _kCheckpoints.length - 1;
+
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    // Icon circle
+                    if (isCurrent)
+                      _PulsingCheckpoint(color: cp.color)
+                    else
+                      Opacity(
+                        opacity: isFuture ? 0.35 : 1.0,
+                        child: Container(
+                          width: 32,
+                          height: 32,
+                          decoration: BoxDecoration(
+                            color: isDone
+                                ? cp.color.withOpacity(0.12)
+                                : Colors.transparent,
+                            shape: BoxShape.circle,
+                            border: isDone
+                                ? null
+                                : Border.all(
+                                color: cp.color.withOpacity(0.4),
+                                width: 1.5),
+                          ),
+                          child: Icon(cp.icon, size: 16,
+                              color: isDone
+                                  ? cp.color
+                                  : cp.color.withOpacity(0.5)),
+                        ),
+                      ),
+                    const SizedBox(width: 12),
+                    // Label
+                    Expanded(
+                      child: Opacity(
+                        opacity: isFuture ? 0.4 : 1.0,
+                        child: Text(
+                          cp.label,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: isCurrent
+                                ? FontWeight.bold
+                                : FontWeight.w500,
+                            color: isCurrent
+                                ? const Color(0xFF1F2937)
+                                : const Color(0xFF374151),
+                          ),
+                        ),
+                      ),
+                    ),
+                    // Timestamp
+                    if (ts != null)
+                      Text(
+                        '${_formatDate(ts)}\n${_formatTime(ts)}',
+                        textAlign: TextAlign.right,
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: Color(0xFF9CA3AF),
+                          height: 1.4,
+                        ),
+                      ),
+                  ],
+                ),
+                // Connector line
+                if (!isLast)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 15),
+                    child: Container(
+                      width: 2,
+                      height: 22,
+                      color: i < ci
+                          ? _kCheckpoints[i + 1].color.withOpacity(0.25)
+                          : const Color(0xFFE5E7EB),
+                    ),
+                  ),
+              ],
+            );
+          }),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PULSING CHECKPOINT — animated current step
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _PulsingCheckpoint extends StatefulWidget {
+  final Color color;
+  const _PulsingCheckpoint({required this.color});
+
+  @override
+  State<_PulsingCheckpoint> createState() => _PulsingCheckpointState();
+}
+
+class _PulsingCheckpointState extends State<_PulsingCheckpoint>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c;
+  late final Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _c = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    )..repeat(reverse: true);
+    _scale = Tween<double>(begin: 1.0, end: 1.15)
+        .animate(CurvedAnimation(parent: _c, curve: Curves.easeInOut));
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ScaleTransition(
+      scale: _scale,
+      child: Container(
+        width: 32,
+        height: 32,
+        decoration: BoxDecoration(
+          color: widget.color.withOpacity(0.15),
+          shape: BoxShape.circle,
+          border: Border.all(color: widget.color, width: 2),
+        ),
+        child: Icon(
+          Icons.radio_button_checked_rounded,
+          size: 16,
+          color: widget.color,
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PAYMENT CONFIRM SHEET
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _PaymentConfirmSheet extends StatefulWidget {
+  final BookingModel booking;
+  final VoidCallback onConfirmed;
+
+  const _PaymentConfirmSheet({
+    required this.booking,
+    required this.onConfirmed,
+  });
+
+  @override
+  State<_PaymentConfirmSheet> createState() => _PaymentConfirmSheetState();
+}
+
+class _PaymentConfirmSheetState extends State<_PaymentConfirmSheet> {
+  PaymentMethod _method = PaymentMethod.cash;
+  bool _saving = false;
+  String? _errorMsg;
+
+  Future<void> _confirm() async {
+    setState(() { _saving = true; _errorMsg = null; });
+    final b   = widget.booking;
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+    try {
+      // 1. Update booking to completed
+      await FirebaseFirestore.instance
+          .collection('bookings')
+          .doc(b.firestoreId)
+          .update({
+        'status':                     'completed',
+        'paymentConfirmed':           true,
+        'paymentMethod':              _method.name,
+        'completedAt':                FieldValue.serverTimestamp(),
+        'statusTimestamps.completed': FieldValue.serverTimestamp(),
+      });
+
+      // 2. Update chat bookingStatus
+      if (b.helperId != null && b.helperId!.isNotEmpty) {
+        try {
+          await FirebaseFirestore.instance
+              .collection('chats')
+              .doc('${uid}_${b.helperId}')
+              .update({'bookingStatus': 'completed'});
+        } catch (e) {
+          debugPrint('[PaymentConfirmSheet] chat update: $e');
+        }
+      }
+
+      // 3. Write completion notification
+      await FirebaseFirestore.instance
+          .collection('notifications')
+          .doc(uid)
+          .collection('items')
+          .add({
+        'type':      'booking_completed',
+        'title':     'Service Completed',
+        'body':      'Your ${b.serviceName} service is complete. '
+            'Please rate ${b.helperName}.',
+        'bookingId': b.id,
+        'read':      false,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      if (!mounted) return;
+
+      // 4. Pop this payment sheet
+      // ignore: use_build_context_synchronously
+      Navigator.of(context, rootNavigator: true).pop();
+
+      // 5. Let parent handle details-sheet pop + review sheet
+      widget.onConfirmed();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _errorMsg = 'Failed to confirm. Please try again.';
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final b     = widget.booking;
+    const color = Color(0xFF059669);
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      child: DraggableScrollableSheet(
+        initialChildSize: 0.65,
+        minChildSize: 0.5,
+        maxChildSize: 0.9,
+        expand: false,
+        builder: (_, ctrl) => SingleChildScrollView(
+          controller: ctrl,
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 32),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  margin: const EdgeInsets.symmetric(vertical: 12),
+                  width: 42, height: 4,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE5E7EB),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              // Header
+              Row(children: [
+                Container(
+                  width: 44, height: 44,
+                  decoration: BoxDecoration(
+                    color: color.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(Icons.verified_rounded,
+                      color: color, size: 22),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Confirm Service Complete',
+                          style: TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF1F2937))),
+                      Text('${b.serviceName} · ${b.helperName}',
+                          style: const TextStyle(
+                              fontSize: 12, color: Color(0xFF6B7280))),
+                    ],
+                  ),
+                ),
+              ]),
+              const SizedBox(height: 20),
+              // Payment summary
+              _DetailSection(
+                label: 'PAYMENT SUMMARY',
+                child: Column(children: [
+                  _PayRow(
+                      label: '${b.serviceName} Base Fee',
+                      value: '₹${b.baseAmount.toStringAsFixed(2)}'),
+                  const SizedBox(height: 8),
+                  _PayRow(
+                      label: 'Platform Fee (5%)',
+                      value: '₹${b.platformFee.toStringAsFixed(2)}'),
+                  const SizedBox(height: 12),
+                  const Divider(height: 1, color: Color(0xFFF3F4F6)),
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Total Amount',
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 15,
+                              color: Color(0xFF1F2937))),
+                      Text(
+                        '₹${b.totalAmount?.toStringAsFixed(2) ?? b.baseAmount.toStringAsFixed(2)}',
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 18,
+                            color: Color(0xFF059669)),
+                      ),
+                    ],
+                  ),
+                ]),
+              ),
+              const SizedBox(height: 16),
+              // Payment method
+              const Text('Payment Method',
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF374151))),
+              const SizedBox(height: 10),
+              _PaymentMethodSelector(
+                selected: _method,
+                color: color,
+                onChanged: (v) => setState(() => _method = v),
+              ),
+              if (_errorMsg != null) ...[
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFEE2E2),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Row(children: [
+                    const Icon(Icons.error_outline_rounded,
+                        color: Color(0xFFDC2626), size: 15),
+                    const SizedBox(width: 8),
+                    Expanded(
+                        child: Text(_errorMsg!,
+                            style: const TextStyle(
+                                fontSize: 12,
+                                color: Color(0xFFDC2626)))),
+                  ]),
+                ),
+              ],
+              const SizedBox(height: 24),
+              // Confirm button
+              SizedBox(
+                width: double.infinity,
+                height: 54,
+                child: ElevatedButton(
+                  onPressed: _saving ? null : _confirm,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: color,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(28)),
+                  ),
+                  child: _saving
+                      ? const SizedBox(
+                      width: 22, height: 22,
+                      child: CircularProgressIndicator(
+                          color: Colors.white, strokeWidth: 2.5))
+                      : const Text(
+                      'Confirm Payment & Mark Complete',
+                      style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white)),
+                ),
+              ),
+              const SizedBox(height: 12),
+              // Not done yet
+              Center(
+                child: GestureDetector(
+                  onTap: () =>
+                      Navigator.of(context, rootNavigator: true).pop(),
+                  child: const Text(
+                    'Not done yet — go back',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: Color(0xFF9CA3AF),
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PENDING / CANCELLED BOOKING CARD
+// ─────────────────────────────────────────────────────────────────────────────
+
 class _BookingCard extends StatelessWidget {
   final BookingModel booking;
   const _BookingCard({required this.booking});
@@ -1326,7 +1914,8 @@ class _BookingCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final b = booking;
-    final isPending = b.status == BookingStatus.pending;
+    final isPending = b.status == BookingStatus.booked ||
+        b.status == BookingStatus.assigned;
 
     return GestureDetector(
       onTap: () => _openDetails(context, b),
@@ -2196,6 +2785,31 @@ class _BookingDetailsSheet extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 14),
+            const SizedBox(height: 14),
+            // ── Live booking progress timeline ──────────────────────────
+            if (b.firestoreId.isNotEmpty && !b.firestoreId.startsWith('demo_'))
+              StreamBuilder<DocumentSnapshot>(
+                stream: FirebaseFirestore.instance
+                    .collection('bookings')
+                    .doc(b.firestoreId)
+                    .snapshots(),
+                builder: (_, snap) {
+                  if (!snap.hasData) return const SizedBox.shrink();
+                  final d = snap.data!.data() as Map<String, dynamic>?;
+                  if (d == null) return const SizedBox.shrink();
+                  final rawTs =
+                      d['statusTimestamps'] as Map<String, dynamic>? ?? {};
+                  final timestamps = rawTs.map((k, v) =>
+                      MapEntry(k, v is Timestamp ? v.toDate() : null));
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 14),
+                    child: BookingProgressTimeline(
+                      currentStatus: d['status'] as String? ?? 'booked',
+                      statusTimestamps: timestamps,
+                    ),
+                  );
+                },
+              ),
             _DetailSection(
               child: Column(
                 children: [
@@ -2309,23 +2923,22 @@ class _BookingDetailsSheet extends StatelessWidget {
             const SizedBox(height: 24),
 
             // ── CHANGED: bottom action buttons ────────────────────────────
-            if (b.status == BookingStatus.pending ||
-                b.status == BookingStatus.active) ...[
+            // ── Action buttons based on current status ─────────────────────
+            if (b.status == BookingStatus.booked ||
+                b.status == BookingStatus.assigned) ...[
               Row(
                 children: [
                   Expanded(
                     child: OutlinedButton(
-                      // ── CHANGED: was Navigator.pop + _confirmCancel (same, kept) ──
                       onPressed: () async {
-                        await _confirmCancel(ctx, b);   // pass ctx (DraggableScrollableSheet context)
+                        await _confirmCancel(ctx, b);
                         if (ctx.mounted) Navigator.pop(ctx);
                       },
                       style: OutlinedButton.styleFrom(
                         side: const BorderSide(color: Color(0xFFE5E7EB)),
                         shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(16)),
-                        padding:
-                        const EdgeInsets.symmetric(vertical: 14),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
                       ),
                       child: const Text('Cancel Request',
                           style: TextStyle(
@@ -2336,7 +2949,6 @@ class _BookingDetailsSheet extends StatelessWidget {
                   const SizedBox(width: 12),
                   Expanded(
                     child: ElevatedButton.icon(
-                      // ── CHANGED: was () {} — now opens edit sheet ─────────
                       onPressed: () {
                         Navigator.pop(ctx);
                         _openEditSheet(context, b);
@@ -2352,12 +2964,82 @@ class _BookingDetailsSheet extends StatelessWidget {
                         elevation: 0,
                         shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(16)),
-                        padding:
-                        const EdgeInsets.symmetric(vertical: 14),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
                       ),
                     ),
                   ),
                 ],
+              ),
+            ] else if (b.status == BookingStatus.arrived ||
+                b.status == BookingStatus.inProgress) ...[
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: () {
+                    if (b.firestoreId.isEmpty ||
+                        b.firestoreId.startsWith('demo_')) {
+                      ScaffoldMessenger.of(ctx).showSnackBar(
+                        const SnackBar(
+                          content: Text('Demo booking — cannot mark complete'),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                      return;
+                    }
+                    if (b.userReviewDone) {
+                      ScaffoldMessenger.of(ctx).showSnackBar(
+                        const SnackBar(
+                          content: Text('Review already submitted for this booking'),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                      return;
+                    }
+                    // Capture root navigator BEFORE opening nested sheet
+                    final rootNav = Navigator.of(ctx, rootNavigator: true);
+                    showModalBottomSheet(
+                      context: ctx,
+                      isScrollControlled: true,
+                      backgroundColor: Colors.transparent,
+                      useSafeArea: true,
+                      useRootNavigator: true,
+                      builder: (_) => _PaymentConfirmSheet(
+                        booking: b,
+                        onConfirmed: () {
+                          // Pop the details sheet
+                          rootNav.pop();
+                          // Show review sheet after sheets settle
+                          Future.delayed(
+                            const Duration(milliseconds: 350),
+                                () {
+                              MutualReviewSheet.showForUser(
+                                rootNav.context,
+                                bookingId:   b.id,
+                                helperId:    b.helperId ?? '',
+                                helperName:  b.helperName,
+                                serviceName: b.serviceName,
+                              );
+                            },
+                          );
+                        },
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.verified_rounded,
+                      size: 18, color: Colors.white),
+                  label: const Text('Service Done & Pay',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF059669),
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16)),
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                  ),
+                ),
               ),
             ] else if (b.status == BookingStatus.completed) ...[
               Row(
@@ -2640,7 +3322,7 @@ class _BookNowSheetState extends State<_BookNowSheet> {
       serviceIcon:   widget.serviceIcon,
       serviceColor:  widget.serviceColor,
       serviceBgColor: widget.serviceBgColor,
-      status:        BookingStatus.pending,
+      status:        BookingStatus.booked,
       helperName:    widget.helperName,
       helperId:      widget.helperId,
       helperRating:  widget.helperRating,
@@ -3239,16 +3921,28 @@ class _StatusBadge extends StatelessWidget {
     IconData icon;
 
     switch (status) {
-      case BookingStatus.active:
-        color = const Color(0xFF059669);
-        bg = const Color(0xFFD1FAE5);
-        label = 'ACTIVE';
-        icon = Icons.circle;
-        break;
-      case BookingStatus.pending:
+      case BookingStatus.booked:
         color = const Color(0xFFD97706);
         bg = const Color(0xFFFEF3C7);
-        label = 'PENDING';
+        label = 'BOOKED';
+        icon = Icons.circle;
+        break;
+      case BookingStatus.assigned:
+        color = const Color(0xFF7C3AED);
+        bg = const Color(0xFFEDE9FE);
+        label = 'ASSIGNED';
+        icon = Icons.circle;
+        break;
+      case BookingStatus.arrived:
+        color = const Color(0xFF0891B2);
+        bg = const Color(0xFFE0F2FE);
+        label = 'ARRIVED';
+        icon = Icons.circle;
+        break;
+      case BookingStatus.inProgress:
+        color = const Color(0xFF059669);
+        bg = const Color(0xFFD1FAE5);
+        label = 'IN PROGRESS';
         icon = Icons.circle;
         break;
       case BookingStatus.completed:
