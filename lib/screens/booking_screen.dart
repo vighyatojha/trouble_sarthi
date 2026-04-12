@@ -195,11 +195,13 @@ class BookingService {
           {
             'chatId':          chatId,
             'userId':          _uid,
+            'userName':        userName,            // ← ADD: helper app displays this
             'helperId':        booking.helperId,
             'helperName':      booking.helperName,
-            'helperPhoto':     '',          // populated later by helper app
+            'helperPhoto':     '',
+            'otherName':       booking.helperName, // ← ADD: _ConversationTile needs this
             'serviceName':     booking.serviceName,
-            'bookingId':       booking.id, // bookingCode string, NOT Firestore docId
+            'bookingId':       booking.id,
             'participants':    [_uid, booking.helperId],
             'lastMessage':     '',
             'lastMessageTime': FieldValue.serverTimestamp(),
@@ -207,7 +209,7 @@ class BookingService {
             'bookingStatus':   'active',
             'createdAt':       FieldValue.serverTimestamp(),
           },
-          SetOptions(merge: true), // merge so re-bookings don't wipe history
+          SetOptions(merge: true),
         );
       }
 

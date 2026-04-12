@@ -10,7 +10,7 @@ class HelperModel {
   final double rating;
   final int completedJobs;
   final bool isAvailable;
-  final double pricePerHour;
+  final double pricePerVisit;
   final String phoneNumber;
   final String experience;
   final String location;
@@ -29,7 +29,7 @@ class HelperModel {
     required this.rating,
     required this.completedJobs,
     required this.isAvailable,
-    required this.pricePerHour,
+    required this.pricePerVisit,
     required this.phoneNumber,
     required this.experience,
     required this.location,
@@ -96,7 +96,8 @@ class HelperModel {
       rating: (data['rating'] ?? 0).toDouble(),
       completedJobs: (jobs as num).toInt(),
       isAvailable: isAvailable,
-      pricePerHour: (data['pricePerHour'] ?? 0).toDouble(),
+      // REPLACE:
+      pricePerVisit: (data['pricePerVisit'] ?? data['pricePerHour'] ?? 0).toDouble(),
       phoneNumber: phone,
       experience: data['experience'] ?? '',
       location: location,
@@ -143,7 +144,7 @@ class HelperModel {
       'rating': rating,
       'completedJobs': completedJobs,
       'isAvailable': isAvailable,
-      'pricePerHour': pricePerHour,
+      'pricePerVisit': pricePerVisit,
       'phoneNumber': phoneNumber,
       'experience': experience,
       'location': location,
@@ -158,7 +159,7 @@ class HelperModel {
         id: '1', name: 'Rajesh Kumar', serviceType: serviceType,
         category: 'Home Services', subcategory: serviceType,
         rating: 4.5, completedJobs: 120, isAvailable: true,
-        pricePerHour: 200, phoneNumber: '+91 98765 43210',
+        pricePerVisit: 200, phoneNumber: '+91 98765 43210',
         experience: '5 years', location: 'Surat, Gujarat',
         skills: ['Professional', 'Experienced', 'Reliable'],
         icon: _iconForService(serviceType), color: _colorForService(serviceType),
@@ -167,7 +168,7 @@ class HelperModel {
         id: '2', name: 'Amit Patel', serviceType: serviceType,
         category: 'Home Services', subcategory: serviceType,
         rating: 4.8, completedJobs: 200, isAvailable: false,
-        pricePerHour: 250, phoneNumber: '+91 98765 43211',
+        pricePerVisit: 250, phoneNumber: '+91 98765 43211',
         experience: '7 years', location: 'Surat, Gujarat',
         skills: ['Expert', 'Fast Service', 'Quality Work'],
         icon: _iconForService(serviceType), color: _colorForService(serviceType),
@@ -177,7 +178,7 @@ class HelperModel {
         id: '3', name: 'Suresh Shah', serviceType: serviceType,
         category: 'Home Services', subcategory: serviceType,
         rating: 4.3, completedJobs: 85, isAvailable: true,
-        pricePerHour: 180, phoneNumber: '+91 98765 43212',
+        pricePerVisit: 180, phoneNumber: '+91 98765 43212',
         experience: '3 years', location: 'Surat, Gujarat',
         skills: ['Affordable', 'Punctual', 'Skilled'],
         icon: _iconForService(serviceType), color: _colorForService(serviceType),

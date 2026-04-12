@@ -1591,26 +1591,43 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
       // ── FIXED (Problem B): Booking lookup with docId fallback ────────────
       if (isUserRole) {
         final currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
-        // Try by bookingCode field first
+        // Try by bookingCode field first, fallback to doc ID
         var bookingSnap = await FirebaseFirestore.instance
             .collection('bookings')
             .where('bookingCode', isEqualTo: widget.bookingId)
             .where('userId', isEqualTo: currentUid)
-            .limit(1).get();
-        // Fallback: treat bookingId as the Firestore document ID
+            .limit(1)
+            .get();
+
+        final updateData = {
+          'status': 'completed',
+          'completedAt': FieldValue.serverTimestamp(),
+          'userRating': _starRating,
+          if (note.isNotEmpty) 'userReview': note,
+        };
+
         if (bookingSnap.docs.isEmpty) {
           final directDoc = await FirebaseFirestore.instance
-              .collection('bookings').doc(widget.bookingId).get();
+              .collection('bookings')
+              .doc(widget.bookingId)
+              .get();
           if (directDoc.exists) {
-            await directDoc.reference.update({
-              'status': 'completed',
-              'completedAt': FieldValue.serverTimestamp(),
-            });
+            await directDoc.reference.update(updateData);
           }
         } else {
-          await bookingSnap.docs.first.reference.update({
-            'status': 'completed',
-            'completedAt': FieldValue.serverTimestamp(),
+          await bookingSnap.docs.first.reference.update(updateData);
+        }
+      } else {
+        // Helper-role: also save helperRating to booking doc
+        final directDoc = await FirebaseFirestore.instance
+            .collection('bookings')
+            .doc(widget.bookingId)
+            .get();
+        if (directDoc.exists) {
+          await directDoc.reference.update({
+            'helperRating': _starRating,
+            if (note.isNotEmpty) 'helperReview': note,
+            'helperRatedAt': FieldValue.serverTimestamp(),
           });
         }
       }

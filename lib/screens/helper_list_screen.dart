@@ -665,36 +665,108 @@ class _HelperListScreenState extends State<HelperListScreen>
   // ───────────────────────────────────────────────────────────────────
 
   Stream<List<HelperModel>> _helpersStream(String sidebarName) {
+    final normalized = sidebarName.trim().toLowerCase();
+
+    // Fetch ALL helpers with no filter — match everything in-memory
+    // This avoids any Firestore field name / value mismatch
     return FirebaseFirestore.instance
         .collection('helpers')
-        .where('subcategory', isEqualTo: sidebarName)
-        .where('kycStatus', isEqualTo: 'approved')
-    // isAvailable filter removed — we handle offline+blocked in UI
         .snapshots()
-        .map((snap) => snap.docs
-        .map((doc) {
-      try {
-        final data = doc.data() as Map<String, dynamic>;
-        // Sanitize location if it was saved as "[object Object]"
-        if (data['location'] is! String ||
-            (data['location'] as String).contains('[object')) {
-          data['location'] = data['area'] ?? 'Location not set';
-        }
-        // Normalize completedJobs — some docs use totalJobs
-        if (!data.containsKey('completedJobs')) {
-          data['completedJobs'] = data['totalJobs'] ?? 0;
-        }
-        // Normalize phoneNumber — some docs use phone
-        if (!data.containsKey('phoneNumber') && data.containsKey('phone')) {
-          data['phoneNumber'] = data['phone'];
-        }
-        return HelperModel.fromFirestore(data, doc.id);
-      } catch (_) {
-        return null;
+        .asyncMap((snap) async {
+      final matched = snap.docs.where((doc) {
+        final d = doc.data();
+
+        // ── KYC check: accept any approved variation
+        final kyc = (d['kycStatus'] as String? ?? '').toLowerCase();
+        final isKycOk = kyc == 'approved' ||
+            kyc == 'verified' ||
+            kyc == 'active' ||
+            (d['isApproved'] == true) ||
+            (d['kycApproved'] == true);
+
+        if (!isKycOk) return false;
+
+        // ── Service match: case-insensitive across all service fields
+        final services = List<String>.from(d['services'] ?? []);
+        final serviceMatch = services.any(
+              (s) => s.trim().toLowerCase() == normalized,
+        );
+
+        final serviceType =
+        (d['serviceType'] as String? ?? '').trim().toLowerCase();
+        final typeMatch = serviceType == normalized;
+
+        final subcategory =
+        (d['subcategory'] as String? ?? '').trim().toLowerCase();
+        final subMatch = subcategory == normalized;
+
+        // ── Partial match fallback: e.g. "plumber" matches "plumbing"
+        final partialMatch = services.any((s) =>
+        s.trim().toLowerCase().contains(normalized) ||
+            normalized.contains(s.trim().toLowerCase())) ||
+            serviceType.contains(normalized) ||
+            normalized.contains(serviceType);
+
+        return serviceMatch || typeMatch || subMatch || partialMatch;
+      }).toList();
+
+      // Debug — remove after confirming helpers show
+      debugPrint('=== HELPER DEBUG ===');
+      debugPrint('Total docs in helpers: ${snap.docs.length}');
+      debugPrint('Matched for "$sidebarName": ${matched.length}');
+      if (snap.docs.isNotEmpty) {
+        final sample = snap.docs.first.data();
+        debugPrint('Sample doc fields: kycStatus=${sample['kycStatus']}, '
+            'isOnline=${sample['isOnline']}, '
+            'services=${sample['services']}, '
+            'serviceType=${sample['serviceType']}');
       }
-    })
-        .whereType<HelperModel>()
-        .toList());
+
+      return matched.map((doc) {
+        try {
+          final data = Map<String, dynamic>.from(doc.data());
+
+          // Normalize location
+          if (data['location'] is! String ||
+              (data['location'] as String).isEmpty ||
+              (data['location'] as String).contains('[object')) {
+            data['location'] = data['area'] ?? 'Location not set';
+          }
+
+          // Normalize completedJobs
+          data['completedJobs'] =
+              data['completedJobs'] ?? data['totalJobs'] ?? 0;
+
+          // Normalize phone
+          data['phoneNumber'] =
+              data['phoneNumber'] ?? data['phone'] ?? '';
+
+          // Normalize profileImage
+          data['profileImage'] = data['profileImage'] ??
+              data['profileUrl'] ??
+              data['photoUrl'];
+
+          // Sync isOnline → isAvailable
+          if (data['isOnline'] == true) {
+            data['isAvailable'] = true;
+          }
+
+          // Normalize experience to string
+          if (data['experience'] is int || data['experience'] is double) {
+            data['experience'] = '${data['experience']} yrs';
+          }
+
+          // Normalize pricePerVisit
+          data['pricePerVisit'] =
+              data['pricePerVisit'] ?? data['pricePerHour'] ?? 0;
+
+          return HelperModel.fromFirestore(data, doc.id);
+        } catch (e) {
+          debugPrint('Error parsing helper ${doc.id}: $e');
+          return null;
+        }
+      }).whereType<HelperModel>().toList();
+    });
   }
 
   // ── Sort helpers ────────────────────────────────────────────────────
@@ -706,7 +778,7 @@ class _HelperListScreenState extends State<HelperListScreen>
         copy.sort((a, b) => b.rating.compareTo(a.rating));
         break;
       case 'Price':
-        copy.sort((a, b) => a.pricePerHour.compareTo(b.pricePerHour));
+        copy.sort((a, b) => a.pricePerVisit.compareTo(b.pricePerVisit));
         break;
       case 'Experience':
         copy.sort((a, b) {
@@ -1460,7 +1532,7 @@ class _HelperCardState extends State<_HelperCard> {
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('STARTING AT',
+                      Text('PRICE/VISIT',
                           style: TextStyle(
                               fontSize: 8,
                               fontWeight: FontWeight.w700,
@@ -1468,7 +1540,7 @@ class _HelperCardState extends State<_HelperCard> {
                               letterSpacing: 0.5)),
                       const SizedBox(height: 2),
                       Text(
-                        '₹${h.pricePerHour.toInt()}/hr',
+                        '₹${h.pricePerVisit.toInt()}/visit',
                         style: const TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.bold,
@@ -2042,7 +2114,7 @@ class _HelperProfileSheet extends StatelessWidget {
                                 crossAxisAlignment:
                                 CrossAxisAlignment.start,
                                 children: [
-                                  Text('Price per Hour',
+                                  Text('Price per Visit',
                                       style: TextStyle(
                                           fontSize: 13,
                                           color: color,
@@ -2057,7 +2129,7 @@ class _HelperProfileSheet extends StatelessWidget {
                               ),
                             ),
                             Text(
-                              '₹${h.pricePerHour.toInt()}',
+                              '₹${h.pricePerVisit.toInt()}',
                               style: TextStyle(
                                   fontSize: 26,
                                   fontWeight: FontWeight.bold,
@@ -2104,7 +2176,7 @@ class _HelperProfileSheet extends StatelessWidget {
                           serviceColor: serviceColor,
                           serviceBgColor: serviceBgColor,
                           serviceIcon: Icons.build_rounded,
-                          pricePerHour: h.pricePerHour,
+                          pricePerHour: h.pricePerVisit,
                         );
                       } else {
                         ScaffoldMessenger.of(context).showSnackBar(
