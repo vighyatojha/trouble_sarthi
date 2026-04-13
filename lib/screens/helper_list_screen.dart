@@ -737,9 +737,12 @@ class _HelperListScreenState extends State<HelperListScreen>
           data['completedJobs'] =
               data['completedJobs'] ?? data['totalJobs'] ?? 0;
 
-          // Normalize phone
           data['phoneNumber'] =
               data['phoneNumber'] ?? data['phone'] ?? '';
+
+// ✅ FIX: Normalize uid — prefer stored 'uid'/'userId' over Firestore doc.id
+// This ensures helperId in bookings matches Firebase Auth UID on helper side
+          data['uid'] = data['uid'] ?? data['userId'] ?? data['authUid'] ?? doc.id;
 
           // Normalize profileImage
           data['profileImage'] = data['profileImage'] ??
