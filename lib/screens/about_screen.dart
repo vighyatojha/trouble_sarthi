@@ -41,7 +41,7 @@ class _AboutScreenState extends State<AboutScreen>
     )..forward();
 
     // Lightweight opacity-only stagger — avoids SlideTransition jank on scroll
-    _fades = List.generate(8, (i) {
+    _fades = List.generate(7, (i) {
       final start = (i * 0.12).clamp(0.0, 0.8);
       final end = (start + 0.35).clamp(0.0, 1.0);
       return Tween<double>(begin: 0, end: 1).animate(
@@ -123,7 +123,7 @@ class _AboutScreenState extends State<AboutScreen>
                   ),
                   const SizedBox(height: 12),
                   _FadeIn(
-                    animation: _fades[7],
+                    animation: _fades[6],
                     child: const _ReviewHistoryBentoGrid(),
                   ),
 
@@ -146,29 +146,7 @@ class _AboutScreenState extends State<AboutScreen>
                   ),
 
                   // ── Demo Banner ──────────────────────────────────
-                  _FadeIn(
-                    animation: _fades[6],
-                    child: _DemoBanner(
-                      onDemoAsUser: () => MutualReviewSheet.showForUser(
-                        context,
-                        bookingId: 'DEMO-001',
-                        helperId: 'helper_demo',
-                        helperName: 'Rajesh Kumar',
-                        serviceName: 'Emergency Plumbing',
-                        demoMode: true,
-                      ),
-                      onDemoAsHelper: () => MutualReviewSheet.showForHelper(
-                        context,
-                        bookingId: 'DEMO-001',
-                        userId: 'user_demo',
-                        userName: 'Arjun Mehta',
-                        serviceName: 'Emergency Plumbing',
-                        demoMode: true,
-                      ),
-                    ),
-                  ),
 
-                  const SizedBox(height: 24),
 
                   const SizedBox(height: 32),
                   // Privacy note
@@ -627,11 +605,11 @@ class _HelperRatingsFeed extends StatelessWidget {
       stream: FirebaseFirestore.instance
           .collectionGroup('helper_to_user')
           .where('revieweeId', isEqualTo: uid)
-          .orderBy('createdAt', descending: true) // FIXED (Problem C/D): index-backed sort
+          .orderBy('createdAt', descending: true)
           .limit(10)
           .snapshots(),
       builder: (context, snap) {
-        if (snap.connectionState == ConnectionState.waiting) {
+        if (snap.connectionState == ConnectionState.waiting && !snap.hasData) {
           return const _SimpleShimmer(height: 90, count: 2);
         }
 
@@ -1780,11 +1758,14 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
           revieweeName: widget.revieweeName,
           anim: _doneScale,
           onClose: () async {
-            if (widget.role == _ReviewerRole.user) {
-              final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
-              final chatId = '${uid}_${widget.revieweeId}';
-              await RealtimeDbService.instance.deleteChat(chatId);
-            }
+            // chatId = Firestore bookingId per BookingChatService contract
+            final chatId = widget.bookingId;
+            await RealtimeDbService.instance.deleteChat(chatId);
+            await FirebaseFirestore.instance
+                .collection('chats')
+                .doc(chatId)
+                .update({'bookingStatus': 'review_done'})
+                .catchError((_) {});
             if (context.mounted) Navigator.pop(context);
             widget.onAfterClose?.call();
           },

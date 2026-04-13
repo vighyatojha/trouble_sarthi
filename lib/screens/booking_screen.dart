@@ -3006,18 +3006,30 @@ class _BookingDetailsSheet extends StatelessWidget {
                       builder: (_) => _PaymentConfirmSheet(
                         booking: b,
                         onConfirmed: () {
-                          // Pop the details sheet
                           rootNav.pop();
-                          // Show review sheet after sheets settle
                           Future.delayed(
                             const Duration(milliseconds: 350),
                                 () {
+                              final chatId = b.firestoreId.isNotEmpty
+                                  ? b.firestoreId
+                                  : b.id;
                               MutualReviewSheet.showForUser(
                                 rootNav.context,
-                                bookingId:   b.id,
+                                bookingId:   chatId,
                                 helperId:    b.helperId ?? '',
                                 helperName:  b.helperName,
                                 serviceName: b.serviceName,
+                                onAfterClose: () {
+                                  RealtimeDbService.instance
+                                      .deleteChat(chatId)
+                                      .then((_) {
+                                    FirebaseFirestore.instance
+                                        .collection('chats')
+                                        .doc(chatId)
+                                        .update({'bookingStatus': 'review_done'})
+                                        .catchError((_) {});
+                                  });
+                                },
                               );
                             },
                           );

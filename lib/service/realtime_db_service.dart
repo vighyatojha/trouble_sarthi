@@ -1,4 +1,3 @@
-
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 
@@ -6,7 +5,7 @@ import 'package:flutter/foundation.dart';
 //  REALTIME DATABASE SERVICE
 //
 //  RTDB tree:
-//    messages/{chatId}/messages/{pushId}  — individual chat messages
+//    chats/{chatId}/messages/{pushId}     — individual chat messages
 //    chatMeta/{chatId}                    — last-message metadata
 //    notifications/{userId}/{pushId}      — per-user notifications
 //
@@ -30,7 +29,6 @@ class RealtimeDbService {
     String type = 'text',
   }) async {
     try {
-      // FIX: path changed from messages/{chatId}/messages → chats/{chatId}/messages
       final msgRef = _db.ref('chats/$chatId/messages').push();
       await msgRef.set({
         'messageId':  msgRef.key,
@@ -72,9 +70,67 @@ class RealtimeDbService {
     );
   }
 
+  // ── Send booking-confirmed auto message ───────────────────────────────────
+  Future<void> sendBookingConfirmedMessage({
+    required String chatId,
+    required String helperId,
+    required String helperName,
+    required String userName,
+    required String serviceName,
+    required String scheduledTime,
+    required String userId,
+  }) async {
+    try {
+      final text =
+          'Hi $userName! 👋 I\'m $helperName, your Sarthi for "$serviceName".'
+          '${scheduledTime.isNotEmpty ? ' I\'ll be there at $scheduledTime.' : ''}'
+          ' Feel free to message me here if you have any questions!';
+
+      final msgRef = _db.ref('chats/$chatId/messages').push();
+      await msgRef.set({
+        'messageId':  msgRef.key,
+        'senderId':   helperId,
+        'senderName': helperName,
+        'text':       text,
+        'type':       'booking_confirmed',
+        'timestamp':  ServerValue.timestamp,
+        'read':       false,
+      });
+
+      await _db.ref('chatMeta/$chatId').update({
+        'lastMessage':     text,
+        'lastMessageTime': ServerValue.timestamp,
+        'lastSenderId':    helperId,
+      });
+    } catch (e) {
+      debugPrint('RealtimeDbService.sendBookingConfirmedMessage error: $e');
+    }
+  }
+
+  // ── Send a system warning message ─────────────────────────────────────────
+  Future<void> sendSystemWarning({
+    required String chatId,
+    required String message,
+  }) async {
+    try {
+      final msgRef = _db.ref('chats/$chatId/messages').push();
+      await msgRef.set({
+        'messageId':  msgRef.key,
+        'senderId':   'system',
+        'senderName': 'Trouble Sarthi',
+        'senderRole': 'system',
+        'text':       message,
+        'type':       'system_warning',
+        'timestamp':  ServerValue.timestamp,
+        'read':       false,
+      });
+    } catch (e) {
+      debugPrint('RealtimeDbService.sendSystemWarning error: $e');
+    }
+  }
+
   // ── Real-time messages stream ─────────────────────────────────────────────
   Stream<List<Map<String, dynamic>>> messagesStream(String chatId) {
-    // FIX: path changed from messages/{chatId}/messages → chats/{chatId}/messages
     return _db
         .ref('chats/$chatId/messages')
         .orderByChild('timestamp')
@@ -100,8 +156,6 @@ class RealtimeDbService {
   // ── Delete entire chat ────────────────────────────────────────────────────
   Future<void> deleteChat(String chatId) async {
     try {
-      // FIX: path changed from messages/{chatId} → chats/{chatId}/messages
-      // chatMeta stays as-is
       await _db.ref('chats/$chatId/messages').remove();
       await _db.ref('chatMeta/$chatId').remove();
       debugPrint('RealtimeDbService: chat $chatId deleted ✓');
@@ -110,7 +164,7 @@ class RealtimeDbService {
     }
   }
 
-  // ── NEW: reset helper's unread count (Sarthi Kendra calls this on open) ───
+  // ── Reset helper's unread count (Sarthi Kendra calls this on open) ────────
   Future<void> resetHelperUnread(String chatId) async {
     try {
       await _db.ref('chats/$chatId/helperUnread').set(0);
@@ -133,12 +187,12 @@ class RealtimeDbService {
     try {
       final ref = _db.ref('notifications/$userId').push();
       await ref.set({
-        'notifId':  ref.key,
-        'type':     type,
-        'title':    title,
-        'body':     body,
+        'notifId':   ref.key,
+        'type':      type,
+        'title':     title,
+        'body':      body,
         if (bookingId != null) 'bookingId': bookingId,
-        'read':     false,
+        'read':      false,
         'timestamp': ServerValue.timestamp,
       });
     } catch (e) {
