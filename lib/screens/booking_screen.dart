@@ -241,14 +241,15 @@ class BookingService {
       }
 
       // ✅ Firestore notification
+      // AFTER — only notifies user their REQUEST was sent, not confirmed yet
       await FirebaseFirestore.instance
           .collection('notifications')
           .doc(_uid)
           .collection('items')
           .add({
-        'type':      'booking_confirmed',
-        'title':     'Booking Confirmed',
-        'body':      'Your request for "${booking.serviceName}" has been confirmed. Helper: ${booking.helperName}.',
+        'type':      'booking_request_sent',
+        'title':     'Booking Request Sent',
+        'body':      'Your request for "${booking.serviceName}" has been sent to ${booking.helperName}. Waiting for helper to accept.',
         'bookingId': booking.id,
         'read':      false,
         'createdAt': FieldValue.serverTimestamp(),
