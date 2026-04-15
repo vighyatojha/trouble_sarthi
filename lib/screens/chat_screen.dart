@@ -6,11 +6,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../service/realtime_db_service.dart';
 import 'about_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CHAT SCREEN
+// CHAT SCREEN  (User side)
 // ─────────────────────────────────────────────────────────────────────────────
 
 class ChatScreen extends StatefulWidget {
@@ -48,12 +49,18 @@ class _ChatScreenState extends State<ChatScreen>
   final _msgCtrl    = TextEditingController();
   final _scrollCtrl = ScrollController();
 
-  // ── Reactive completed flag ───────────────────────────────────────────────
-  bool _isCompleted = false;
+  bool _isCompleted             = false;
+  bool _helperConfirmed         = false;
+  bool _userConfirmed           = false;
+  bool _mutualCompletionHandled = false;
+
   StreamSubscription? _statusSub;
 
   bool _isSending       = false;
   bool _showHelperIntro = false;
+
+  // Track message count to only scroll on NEW messages, not rebuilds
+  int _prevMessageCount = 0;
 
   late final AnimationController _introAnim;
   late final Animation<double>   _introSlide;
@@ -66,24 +73,30 @@ class _ChatScreenState extends State<ChatScreen>
   void initState() {
     super.initState();
 
-    // ── Seed from the param passed in (instant, no flicker) ──────────────
     _isCompleted =
         widget.bookingStatus == 'completed' ||
             widget.bookingStatus == 'cancelled';
 
-    // ── React to Firestore changes so the banner appears the moment the
-    //    booking is marked completed, even while the chat is open ──────────
     _statusSub = FirebaseFirestore.instance
         .collection('chats')
         .doc(widget.chatId)
         .snapshots()
         .listen((snap) {
-      final status = snap.data()?['bookingStatus'] as String? ?? 'active';
-      if (mounted) {
-        setState(() {
-          _isCompleted =
-              status == 'completed' || status == 'cancelled';
-        });
+      final data   = snap.data() ?? {};
+      final status = data['bookingStatus'] as String? ?? 'active';
+      final helperDone = data['helperConfirmedComplete'] as bool? ?? false;
+      final userDone   = data['userConfirmedComplete']   as bool? ?? false;
+
+      if (!mounted) return;
+      setState(() {
+        _helperConfirmed = helperDone;
+        _userConfirmed   = userDone;
+        _isCompleted     = status == 'completed' || status == 'cancelled';
+      });
+
+      if (helperDone && userDone && !_mutualCompletionHandled) {
+        _mutualCompletionHandled = true;
+        _onMutuallyConfirmed();
       }
     });
 
@@ -117,12 +130,29 @@ class _ChatScreenState extends State<ChatScreen>
     }
   }
 
+  // Only scroll when a genuinely new message arrives
+  void _scrollToBottomIfNeeded(int currentCount) {
+    if (currentCount > _prevMessageCount) {
+      _prevMessageCount = currentCount;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollCtrl.hasClients) {
+          _scrollCtrl.animateTo(
+            _scrollCtrl.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 250),
+            curve: Curves.easeOut,
+          );
+        }
+      });
+    }
+  }
+
+  // Immediate scroll after sending
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollCtrl.hasClients) {
         _scrollCtrl.animateTo(
           _scrollCtrl.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
+          duration: const Duration(milliseconds: 250),
           curve: Curves.easeOut,
         );
       }
@@ -153,18 +183,16 @@ class _ChatScreenState extends State<ChatScreen>
     _scrollToBottom();
   }
 
-  // ── Two-step seva completion ──────────────────────────────────────────────
   Future<void> _onSevaCompleted() async {
-    // Step 1 — confirmation dialog
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        title: const Text('Service completed?',
+        title: const Text('Confirm Payment & Completion',
             style: TextStyle(fontWeight: FontWeight.bold)),
         content: Text(
           'Please confirm that "${widget.serviceName ?? "the service"}" '
-              'has been fully completed before rating.',
+              'has been completed and payment has been made.',
         ),
         actions: [
           TextButton(
@@ -180,7 +208,7 @@ class _ChatScreenState extends State<ChatScreen>
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12)),
             ),
-            child: const Text('Yes, it is done',
+            child: const Text('Yes, confirm',
                 style: TextStyle(color: Colors.white)),
           ),
         ],
@@ -189,30 +217,36 @@ class _ChatScreenState extends State<ChatScreen>
 
     if (confirmed != true || !mounted) return;
 
-    // Step 2 — update /bookings doc
-    final snap = await FirebaseFirestore.instance
+    await FirebaseFirestore.instance
+        .collection('chats')
+        .doc(widget.chatId)
+        .update({'userConfirmedComplete': true});
+  }
+
+  Future<void> _onMutuallyConfirmed() async {
+    if (!mounted) return;
+
+    final bookingSnap = await FirebaseFirestore.instance
         .collection('bookings')
         .where('bookingCode', isEqualTo: widget.bookingId ?? '')
         .where('userId', isEqualTo: _uid)
         .limit(1)
         .get();
 
-    if (snap.docs.isNotEmpty) {
-      await snap.docs.first.reference.update({
+    if (bookingSnap.docs.isNotEmpty) {
+      await bookingSnap.docs.first.reference.update({
         'status':      'completed',
         'completedAt': FieldValue.serverTimestamp(),
       });
     }
 
-    // Step 3 — update /chats/{chatId} so the stream above fires instantly
     await FirebaseFirestore.instance
         .collection('chats')
         .doc(widget.chatId)
-        .update({'bookingStatus': 'completed'});
+        .update({'bookingStatus': 'completed'}).catchError((_) {});
 
-    // Step 4 — show the review sheet
     if (!mounted) return;
-    MutualReviewSheet.showForUser(
+      MutualReviewSheet.showForUser(
       context,
       bookingId:   widget.bookingId ?? '',
       helperId:    widget.helperId,
@@ -221,18 +255,181 @@ class _ChatScreenState extends State<ChatScreen>
     );
   }
 
+  // ── Cancel booking ───────────────────────────────────────────────────────
+  Future<void> _cancelBooking() async {
+    Navigator.pop(context); // close bottom sheet first
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Cancel Booking?',
+            style: TextStyle(fontWeight: FontWeight.bold)),
+        content: Text(
+          'Are you sure you want to cancel "${widget.serviceName ?? "this booking"}"? '
+              'This cannot be undone.',
+          style: const TextStyle(color: Color(0xFF6B7280)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('No, keep it'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
+            ),
+            child: const Text('Yes, cancel',
+                style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    try {
+      // Update chat doc
+      await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(widget.chatId)
+          .update({'bookingStatus': 'cancelled'});
+
+      // Update booking doc if bookingId provided
+      if ((widget.bookingId ?? '').isNotEmpty) {
+        final snap = await FirebaseFirestore.instance
+            .collection('bookings')
+            .where('bookingCode', isEqualTo: widget.bookingId)
+            .limit(1)
+            .get();
+        if (snap.docs.isNotEmpty) {
+          await snap.docs.first.reference.update({
+            'status':      'cancelled',
+            'cancelledAt': FieldValue.serverTimestamp(),
+            'cancelledBy': 'user',
+          });
+        }
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Booking cancelled successfully.'),
+          backgroundColor: Color(0xFFDC2626),
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Failed to cancel. Try again.'),
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    }
+  }
+
+  // ── Clear chat ───────────────────────────────────────────────────────────
+  Future<void> _clearChat() async {
+    Navigator.pop(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Clear Chat?',
+            style: TextStyle(fontWeight: FontWeight.bold)),
+        content: const Text(
+          'This will delete all messages. Only visible to you.',
+          style: TextStyle(color: Color(0xFF6B7280)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF0891B2),
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
+            ),
+            child: const Text('Clear', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await RealtimeDbService.instance.deleteChat(widget.chatId);
+      // Clear lastMessage in Firestore so chat list updates too
+      await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(widget.chatId)
+          .update({'lastMessage': '', 'lastMessageTime': null})
+          .catchError((_) {});
+    } catch (_) {}
+  }
+
+  // ── Report helper — opens contact URL with pre-filled info ───────────────
+  Future<void> _reportHelper() async {
+    Navigator.pop(context);
+    final name    = Uri.encodeComponent(widget.helperName);
+    final id      = Uri.encodeComponent(widget.helperId);
+    final service = Uri.encodeComponent(widget.serviceName ?? '');
+    final url = Uri.parse(
+      'https://vighyatojha.github.io/TroubleSarthi_web/contact.html'
+          '?name=${Uri.encodeComponent(_userName)}'
+          '&message=${Uri.encodeComponent('Report: Helper ${widget.helperName} (ID: ${widget.helperId}) — Service: ${widget.serviceName ?? 'N/A'}. Booking ID: ${widget.bookingId ?? 'N/A'}.')}',
+    );
+    if (await canLaunchUrl(url)) {
+      await launchUrl(url, mode: LaunchMode.externalApplication);
+    } else {
+      // Fallback: open base URL
+      final fallback = Uri.parse(
+          'https://vighyatojha.github.io/TroubleSarthi_web/contact.html');
+      if (await canLaunchUrl(fallback)) {
+        await launchUrl(fallback, mode: LaunchMode.externalApplication);
+      }
+    }
+  }
+
+  // ── View booking details — navigates to bookings screen ──────────────────
+  void _viewBookingDetails() {
+    Navigator.pop(context); // close bottom sheet
+    // Navigate back to parent and let parent handle booking detail routing.
+    // If you have a BookingDetailScreen, replace this with:
+    // Navigator.push(context, MaterialPageRoute(builder: (_) => BookingDetailScreen(bookingId: widget.bookingId)));
+    Navigator.pop(context);
+  }
+
   void _showOptionsMenu() {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
       builder: (_) => _ChatOptionsSheet(
-        helperName: widget.helperName,
-        helperId:   widget.helperId,
-        bookingId:  widget.bookingId ?? '',
-        chatId:     widget.chatId,
-        uid:        _uid,
+        helperName:         widget.helperName,
+        helperId:           widget.helperId,
+        bookingId:          widget.bookingId ?? '',
+        chatId:             widget.chatId,
+        uid:                _uid,
+        isCompleted:        _isCompleted,
+        onClearChat:        _clearChat,
+        onReport:           _reportHelper,
+        onViewBooking:      _viewBookingDetails,
+        onCancelBooking:    _cancelBooking,
       ),
     );
+  }
+
+  _SevaButtonState get _sevaButtonState {
+    if (_isCompleted) return _SevaButtonState.hidden;
+    if (_userConfirmed) return _SevaButtonState.hidden;
+    if (_helperConfirmed) return _SevaButtonState.confirmPayment;
+    return _SevaButtonState.hidden;
   }
 
   @override
@@ -244,18 +441,21 @@ class _ChatScreenState extends State<ChatScreen>
         resizeToAvoidBottomInset: true,
         body: Column(
           children: [
-            // ── Header ──────────────────────────────────────────────────
             _ChatHeader(
-              helperName:   widget.helperName,
-              helperPhoto:  widget.helperPhoto,
-              onBackTap:    () => Navigator.pop(context),
-              onProfileTap: _toggleHelperIntro,
-              onOptionsTap: _showOptionsMenu,
-              onSevaTap:    _onSevaCompleted,
-              serviceName:  widget.serviceName,
+              helperName:      widget.helperName,
+              helperPhoto:     widget.helperPhoto,
+              onBackTap:       () => Navigator.pop(context),
+              onProfileTap:    _toggleHelperIntro,
+              onOptionsTap:    _showOptionsMenu,
+              onSevaTap:       _onSevaCompleted,
+              serviceName:     widget.serviceName,
+              isCompleted:     _isCompleted,
+              sevaButtonState: _sevaButtonState,
             ),
 
-            // ── Helper Intro Slide-down ──────────────────────────────────
+            if (_helperConfirmed && !_userConfirmed && !_isCompleted)
+              _HelperConfirmedBanner(onConfirm: _onSevaCompleted),
+
             AnimatedBuilder(
               animation: _introAnim,
               builder: (_, child) => ClipRect(
@@ -274,14 +474,14 @@ class _ChatScreenState extends State<ChatScreen>
               ),
             ),
 
-            // ── Messages ─────────────────────────────────────────────────
             Expanded(
               child: GestureDetector(
                 onTap: () => FocusScope.of(context).unfocus(),
                 child: StreamBuilder<List<Map<String, dynamic>>>(
                   stream: RealtimeDbService.instance.messagesStream(widget.chatId),
                   builder: (context, snap) {
-                    if (snap.connectionState == ConnectionState.waiting) {
+                    if (snap.connectionState == ConnectionState.waiting &&
+                        !snap.hasData) {
                       return const Center(
                         child: CircularProgressIndicator(
                             color: Color(0xFF7C3AED), strokeWidth: 2),
@@ -294,19 +494,23 @@ class _ChatScreenState extends State<ChatScreen>
                       return _EmptyChatState(helperName: widget.helperName);
                     }
 
-                    WidgetsBinding.instance
-                        .addPostFrameCallback((_) => _scrollToBottom());
+                    // Only auto-scroll when message count increases
+                    _scrollToBottomIfNeeded(messages.length);
 
                     return ListView.builder(
                       controller: _scrollCtrl,
                       padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
                       itemCount: messages.length,
+                      // KEY: keeps list stable across rebuilds
+                      key: PageStorageKey(widget.chatId),
                       itemBuilder: (_, i) {
                         final msg  = messages[i];
                         final isMe = msg['senderId'] == _uid;
                         final type = msg['type'] as String? ?? 'text';
 
-                        if (type == 'booking_confirmed' || type == 'system') {
+                        if (type == 'booking_confirmed' ||
+                            type == 'system' ||
+                            type == 'system_warning') {
                           return _SystemMessage(text: msg['text'] ?? '');
                         }
 
@@ -336,29 +540,10 @@ class _ChatScreenState extends State<ChatScreen>
               ),
             ),
 
-            // ── Input Bar / Closed Banner ─────────────────────────────────
             _isCompleted
-                ? Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 20, vertical: 16),
-              color: const Color(0xFFF0FDF4),
-              child: Row(
-                children: [
-                  const Icon(Icons.check_circle_rounded,
-                      color: Color(0xFF059669), size: 20),
-                  const SizedBox(width: 10),
-                  const Expanded(
-                    child: Text(
-                      'Service completed — chat is now closed.',
-                      style: TextStyle(
-                          fontSize: 13,
-                          color: Color(0xFF065F46),
-                          fontWeight: FontWeight.w500),
-                    ),
-                  ),
-                ],
-              ),
-            )
+                ? const _CompletedBanner()
+                : _userConfirmed && !_isCompleted
+                ? const _WaitingForReviewBanner()
                 : _ChatInputBar(
               controller: _msgCtrl,
               isSending:  _isSending,
@@ -377,6 +562,268 @@ class _ChatScreenState extends State<ChatScreen>
   }
 }
 
+// ── Seva button states ────────────────────────────────────────────────────────
+enum _SevaButtonState { hidden, confirmPayment }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHAT OPTIONS SHEET (User side)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _ChatOptionsSheet extends StatelessWidget {
+  final String helperName, helperId, bookingId, chatId, uid;
+  final bool isCompleted;
+  final VoidCallback onClearChat;
+  final VoidCallback onReport;
+  final VoidCallback onViewBooking;
+  final VoidCallback onCancelBooking;
+
+  const _ChatOptionsSheet({
+    required this.helperName,
+    required this.helperId,
+    required this.bookingId,
+    required this.chatId,
+    required this.uid,
+    required this.isCompleted,
+    required this.onClearChat,
+    required this.onReport,
+    required this.onViewBooking,
+    required this.onCancelBooking,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Center(
+            child: Container(
+              width: 40, height: 4,
+              decoration: BoxDecoration(
+                  color: const Color(0xFFE5E7EB),
+                  borderRadius: BorderRadius.circular(2)),
+            ),
+          ),
+          const SizedBox(height: 16),
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text('Chat Options',
+                style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF1F2937))),
+          ),
+          const SizedBox(height: 16),
+
+          _OptionTile(
+            icon:      Icons.receipt_long_rounded,
+            iconColor: const Color(0xFF7C3AED),
+            iconBg:    const Color(0xFFEDE9FE),
+            title:     'View Booking Details',
+            subtitle:  'See your booking info',
+            onTap:     onViewBooking,
+          ),
+
+          _OptionTile(
+            icon:      Icons.cleaning_services_rounded,
+            iconColor: const Color(0xFF0891B2),
+            iconBg:    const Color(0xFFE0F2FE),
+            title:     'Clear Chat',
+            subtitle:  'Remove all messages',
+            onTap:     onClearChat,
+          ),
+
+          if (!isCompleted)
+            _OptionTile(
+              icon:      Icons.cancel_rounded,
+              iconColor: const Color(0xFFDC2626),
+              iconBg:    const Color(0xFFFEE2E2),
+              title:     'Cancel Booking',
+              subtitle:  'Cancel this service booking',
+              onTap:     onCancelBooking,
+            ),
+
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: Divider(color: Color(0xFFF3F4F6)),
+          ),
+
+          _OptionTile(
+            icon:      Icons.flag_rounded,
+            iconColor: const Color(0xFFDC2626),
+            iconBg:    const Color(0xFFFEE2E2),
+            title:     'Report Helper',
+            subtitle:  'Report inappropriate behavior',
+            onTap:     onReport,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _OptionTile extends StatelessWidget {
+  final IconData icon;
+  final Color iconColor, iconBg;
+  final String title, subtitle;
+  final VoidCallback onTap;
+
+  const _OptionTile({
+    required this.icon,
+    required this.iconColor,
+    required this.iconBg,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        child: Row(children: [
+          Container(
+            width: 44, height: 44,
+            decoration: BoxDecoration(
+                color: iconBg, borderRadius: BorderRadius.circular(12)),
+            child: Icon(icon, color: iconColor, size: 22),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title,
+                    style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF1F2937))),
+                Text(subtitle,
+                    style: const TextStyle(
+                        fontSize: 12, color: Color(0xFF9CA3AF))),
+              ],
+            ),
+          ),
+          const Icon(Icons.chevron_right_rounded,
+              color: Color(0xFFD1D5DB), size: 20),
+        ]),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BANNERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _HelperConfirmedBanner extends StatelessWidget {
+  final VoidCallback onConfirm;
+  const _HelperConfirmedBanner({required this.onConfirm});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onConfirm,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        color: const Color(0xFFFFF7ED),
+        child: Row(children: [
+          Container(
+            width: 36, height: 36,
+            decoration: BoxDecoration(
+              color: const Color(0xFFFEF3C7),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: const Icon(Icons.payment_rounded,
+                color: Color(0xFFD97706), size: 20),
+          ),
+          const SizedBox(width: 12),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Helper has confirmed the job is done!',
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF92400E))),
+                SizedBox(height: 2),
+                Text('Tap here to confirm payment & complete.',
+                    style: TextStyle(fontSize: 11, color: Color(0xFFB45309))),
+              ],
+            ),
+          ),
+          const Icon(Icons.chevron_right_rounded,
+              color: Color(0xFFD97706), size: 20),
+        ]),
+      ),
+    );
+  }
+}
+
+class _WaitingForReviewBanner extends StatelessWidget {
+  const _WaitingForReviewBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+      color: const Color(0xFFF0FDF4),
+      child: const Row(children: [
+        SizedBox(
+          width: 18, height: 18,
+          child: CircularProgressIndicator(
+              color: Color(0xFF059669), strokeWidth: 2),
+        ),
+        SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            'Payment confirmed! Waiting for mutual completion…',
+            style: TextStyle(
+                fontSize: 13,
+                color: Color(0xFF065F46),
+                fontWeight: FontWeight.w500),
+          ),
+        ),
+      ]),
+    );
+  }
+}
+
+class _CompletedBanner extends StatelessWidget {
+  const _CompletedBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+      color: const Color(0xFFF0FDF4),
+      child: const Row(children: [
+        Icon(Icons.check_circle_rounded, color: Color(0xFF059669), size: 20),
+        SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            'Service completed — chat is now closed.',
+            style: TextStyle(
+                fontSize: 13,
+                color: Color(0xFF065F46),
+                fontWeight: FontWeight.w500),
+          ),
+        ),
+      ]),
+    );
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CHAT HEADER
 // ─────────────────────────────────────────────────────────────────────────────
@@ -385,6 +832,8 @@ class _ChatHeader extends StatelessWidget {
   final String helperName;
   final String? helperPhoto;
   final String? serviceName;
+  final bool isCompleted;
+  final _SevaButtonState sevaButtonState;
   final VoidCallback onBackTap;
   final VoidCallback onProfileTap;
   final VoidCallback onOptionsTap;
@@ -397,7 +846,9 @@ class _ChatHeader extends StatelessWidget {
     required this.onProfileTap,
     required this.onOptionsTap,
     required this.onSevaTap,
+    required this.sevaButtonState,
     this.serviceName,
+    this.isCompleted = false,
   });
 
   @override
@@ -418,7 +869,6 @@ class _ChatHeader extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(4, 6, 8, 14),
           child: Row(
             children: [
-              // ── Back arrow ───────────────────────────────────────────
               IconButton(
                 onPressed: onBackTap,
                 icon: const Icon(Icons.arrow_back_ios_rounded,
@@ -426,57 +876,48 @@ class _ChatHeader extends StatelessWidget {
                 padding: const EdgeInsets.all(8),
               ),
 
-              // ── Avatar (tappable) ─────────────────────────────────────
               GestureDetector(
                 onTap: onProfileTap,
-                child: Stack(
-                  children: [
-                    Container(
-                      width: 42,
-                      height: 42,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFFA78BFA), Color(0xFF7C3AED)],
-                        ),
-                        border: Border.all(
-                            color: Colors.white.withOpacity(0.3), width: 2),
-                        image: (helperPhoto != null && helperPhoto!.isNotEmpty)
-                            ? DecorationImage(
-                            image: NetworkImage(helperPhoto!),
-                            fit: BoxFit.cover)
-                            : null,
-                      ),
-                      child: (helperPhoto == null || helperPhoto!.isEmpty)
-                          ? Center(
-                          child: Text(initial,
-                              style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 17)))
+                child: Stack(children: [
+                  Container(
+                    width: 42, height: 42,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: const LinearGradient(
+                          colors: [Color(0xFFA78BFA), Color(0xFF7C3AED)]),
+                      border: Border.all(
+                          color: Colors.white.withOpacity(0.3), width: 2),
+                      image: (helperPhoto != null && helperPhoto!.isNotEmpty)
+                          ? DecorationImage(
+                          image: NetworkImage(helperPhoto!),
+                          fit: BoxFit.cover)
                           : null,
                     ),
-                    Positioned(
-                      right: 0,
-                      bottom: 0,
-                      child: Container(
-                        width: 11,
-                        height: 11,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF22C55E),
-                          shape: BoxShape.circle,
-                          border:
-                          Border.all(color: Colors.white, width: 1.5),
-                        ),
+                    child: (helperPhoto == null || helperPhoto!.isEmpty)
+                        ? Center(
+                        child: Text(initial,
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 17)))
+                        : null,
+                  ),
+                  Positioned(
+                    right: 0, bottom: 0,
+                    child: Container(
+                      width: 11, height: 11,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF22C55E),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 1.5),
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                ]),
               ),
 
               const SizedBox(width: 10),
 
-              // ── Name + service (tappable) ─────────────────────────────
               Expanded(
                 child: GestureDetector(
                   onTap: onProfileTap,
@@ -484,17 +925,21 @@ class _ChatHeader extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Row(children: [
-                        Text(helperName,
-                            style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 15)),
+                        Flexible(
+                          child: Text(helperName,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 15)),
+                        ),
                         const SizedBox(width: 4),
                         const Icon(Icons.keyboard_arrow_down_rounded,
                             color: Color(0xFFC4B5FD), size: 16),
                       ]),
                       if (serviceName != null)
                         Text(serviceName!,
+                            overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
                                 color: Color(0xFFC4B5FD), fontSize: 11)),
                     ],
@@ -502,42 +947,42 @@ class _ChatHeader extends StatelessWidget {
                 ),
               ),
 
-              // ── Seva Completed button ─────────────────────────────────
-              GestureDetector(
-                onTap: onSevaTap,
-                child: Container(
-                  padding:
-                  const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF059669),
-                    borderRadius: BorderRadius.circular(18),
-                    boxShadow: [
-                      BoxShadow(
-                        color: const Color(0xFF059669).withOpacity(0.4),
-                        blurRadius: 8,
-                        offset: const Offset(0, 3),
-                      ),
-                    ],
-                  ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.verified_rounded,
-                          color: Colors.white, size: 13),
-                      SizedBox(width: 4),
-                      Text('Seva Done',
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold)),
-                    ],
+              if (sevaButtonState == _SevaButtonState.confirmPayment)
+                GestureDetector(
+                  onTap: onSevaTap,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 7),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFD97706),
+                      borderRadius: BorderRadius.circular(18),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFFD97706).withOpacity(0.4),
+                          blurRadius: 8,
+                          offset: const Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.payment_rounded,
+                            color: Colors.white, size: 13),
+                        SizedBox(width: 4),
+                        Text('Confirm Payment',
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold)),
+                      ],
+                    ),
                   ),
                 ),
-              ),
 
               const SizedBox(width: 4),
 
-              // ── 3 dots menu ───────────────────────────────────────────
+              // 3-dot menu
               IconButton(
                 onPressed: onOptionsTap,
                 icon: const Icon(Icons.more_vert_rounded,
@@ -553,7 +998,7 @@ class _ChatHeader extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HELPER INTRO SLIDE-DOWN CARD
+// HELPER INTRO CARD
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _HelperIntroCard extends StatelessWidget {
@@ -588,693 +1033,66 @@ class _HelperIntroCard extends StatelessWidget {
           ),
         ],
       ),
-      child: Row(
-        children: [
-          Container(
-            width: 54,
-            height: 54,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: const LinearGradient(
-                colors: [Color(0xFFA78BFA), Color(0xFF7C3AED)],
-              ),
-              border: Border.all(
-                  color: Colors.white.withOpacity(0.25), width: 2),
-              image: (helperPhoto != null && helperPhoto!.isNotEmpty)
-                  ? DecorationImage(
-                  image: NetworkImage(helperPhoto!), fit: BoxFit.cover)
-                  : null,
-            ),
-            child: (helperPhoto == null || helperPhoto!.isEmpty)
-                ? Center(
-                child: Text(initial,
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 22)))
+      child: Row(children: [
+        Container(
+          width: 54, height: 54,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: const LinearGradient(
+                colors: [Color(0xFFA78BFA), Color(0xFF7C3AED)]),
+            border:
+            Border.all(color: Colors.white.withOpacity(0.25), width: 2),
+            image: (helperPhoto != null && helperPhoto!.isNotEmpty)
+                ? DecorationImage(
+                image: NetworkImage(helperPhoto!), fit: BoxFit.cover)
                 : null,
           ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(helperName,
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 15)),
-                const SizedBox(height: 3),
-                Text(intro,
-                    style: TextStyle(
-                        color: Colors.white.withOpacity(0.7),
-                        fontSize: 11,
-                        height: 1.4)),
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          Column(
+          child: (helperPhoto == null || helperPhoto!.isEmpty)
+              ? Center(
+              child: Text(initial,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 22)))
+              : null,
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(children: [
-                const Icon(Icons.star_rounded,
-                    color: Color(0xFFFBBF24), size: 14),
-                const SizedBox(width: 3),
-                Text(rating,
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 13)),
-              ]),
-              const SizedBox(height: 4),
-              Text('$jobCount+ jobs',
+              Text(helperName,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15)),
+              const SizedBox(height: 3),
+              Text(intro,
                   style: TextStyle(
-                      color: Colors.white.withOpacity(0.6), fontSize: 10)),
+                      color: Colors.white.withOpacity(0.7),
+                      fontSize: 11,
+                      height: 1.4)),
             ],
           ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// CHAT OPTIONS SHEET (3 dots menu)
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _ChatOptionsSheet extends StatelessWidget {
-  final String helperName;
-  final String helperId;
-  final String bookingId;
-  final String chatId;
-  final String uid;
-
-  const _ChatOptionsSheet({
-    required this.helperName,
-    required this.helperId,
-    required this.bookingId,
-    required this.chatId,
-    required this.uid,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Center(
-            child: Container(
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                  color: const Color(0xFFE5E7EB),
-                  borderRadius: BorderRadius.circular(2)),
-            ),
-          ),
-          const SizedBox(height: 16),
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text('Chat Options',
-                style: TextStyle(
-                    fontSize: 16,
+        ),
+        const SizedBox(width: 12),
+        Column(children: [
+          Row(children: [
+            const Icon(Icons.star_rounded,
+                color: Color(0xFFFBBF24), size: 14),
+            const SizedBox(width: 3),
+            Text(rating,
+                style: const TextStyle(
+                    color: Colors.white,
                     fontWeight: FontWeight.bold,
-                    color: Color(0xFF1F2937))),
-          ),
-          const SizedBox(height: 16),
-
-          _OptionTile(
-            icon:      Icons.receipt_long_rounded,
-            iconColor: const Color(0xFF7C3AED),
-            iconBg:    const Color(0xFFEDE9FE),
-            title:     'View Booking Details',
-            subtitle:  'See your booking info',
-            onTap: () {
-              Navigator.pop(context);
-            },
-          ),
-
-          _OptionTile(
-            icon:      Icons.cleaning_services_rounded,
-            iconColor: const Color(0xFF0891B2),
-            iconBg:    const Color(0xFFE0F2FE),
-            title:     'Clear Chat',
-            subtitle:  'Remove all messages locally',
-            onTap: () {
-              Navigator.pop(context);
-              _showClearChatConfirm(context);
-            },
-          ),
-
-          _OptionTile(
-            icon:      Icons.block_rounded,
-            iconColor: const Color(0xFFD97706),
-            iconBg:    const Color(0xFFFEF3C7),
-            title:     'Block Helper',
-            subtitle:  'Stop receiving messages',
-            onTap: () {
-              Navigator.pop(context);
-              _blockHelper(context);
-            },
-          ),
-
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 8),
-            child: Divider(color: Color(0xFFF3F4F6)),
-          ),
-
-          _OptionTile(
-            icon:      Icons.flag_rounded,
-            iconColor: const Color(0xFFDC2626),
-            iconBg:    const Color(0xFFFEE2E2),
-            title:     'Report',
-            subtitle:  'Report inappropriate behavior',
-            onTap: () {
-              Navigator.pop(context);
-              _showReportSheet(context);
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showClearChatConfirm(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        shape:
-        RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Clear Chat?',
-            style: TextStyle(fontWeight: FontWeight.bold)),
-        content: const Text('This will delete all messages for you only.',
-            style: TextStyle(color: Color(0xFF6B7280))),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () async {
-              Navigator.pop(context);
-              await RealtimeDbService.instance.deleteChat(chatId);
-            },
-            style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF0891B2), elevation: 0),
-            child:
-            const Text('Clear', style: TextStyle(color: Colors.white)),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _blockHelper(BuildContext context) async {
-    await FirebaseFirestore.instance
-        .collection('users')
-        .doc(uid)
-        .collection('blocked')
-        .doc(helperId)
-        .set({
-      'blockedAt':  FieldValue.serverTimestamp(),
-      'helperId':   helperId,
-      'helperName': helperName,
-    });
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Helper blocked successfully'),
-        backgroundColor: Color(0xFFD97706),
-        behavior: SnackBarBehavior.floating,
-      ));
-    }
-  }
-
-  void _showReportSheet(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => _ReportSheet(
-        helperName:     helperName,
-        helperId:       helperId,
-        bookingId:      bookingId,
-        chatId:         chatId,
-        reporterUserId: uid,
-      ),
-    );
-  }
-}
-
-class _OptionTile extends StatelessWidget {
-  final IconData  icon;
-  final Color     iconColor;
-  final Color     iconBg;
-  final String    title;
-  final String    subtitle;
-  final VoidCallback onTap;
-
-  const _OptionTile({
-    required this.icon,
-    required this.iconColor,
-    required this.iconBg,
-    required this.title,
-    required this.subtitle,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        child: Row(children: [
-          Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-                color: iconBg, borderRadius: BorderRadius.circular(12)),
-            child: Icon(icon, color: iconColor, size: 22),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title,
-                    style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFF1F2937))),
-                Text(subtitle,
-                    style: const TextStyle(
-                        fontSize: 12, color: Color(0xFF9CA3AF))),
-              ],
-            ),
-          ),
-          const Icon(Icons.chevron_right_rounded,
-              color: Color(0xFFD1D5DB), size: 20),
-        ]),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// REPORT SHEET
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _ReportSheet extends StatefulWidget {
-  final String helperName;
-  final String helperId;
-  final String bookingId;
-  final String chatId;
-  final String reporterUserId;
-
-  const _ReportSheet({
-    required this.helperName,
-    required this.helperId,
-    required this.bookingId,
-    required this.chatId,
-    required this.reporterUserId,
-  });
-
-  @override
-  State<_ReportSheet> createState() => _ReportSheetState();
-}
-
-class _ReportSheetState extends State<_ReportSheet> {
-  int?   _selectedReason;
-  final  _detailCtrl   = TextEditingController();
-  bool   _isSubmitting = false;
-  String? _errorMsg;
-
-  static const List<Map<String, dynamic>> _reasons = [
-    {
-      'icon':  Icons.warning_amber_rounded,
-      'color': Color(0xFFDC2626),
-      'label': 'Harassment or Abusive Language',
-      'sub':   'Rude, threatening, or abusive messages',
-    },
-    {
-      'icon':  Icons.block_rounded,
-      'color': Color(0xFFD97706),
-      'label': 'Inappropriate Content',
-      'sub':   'Offensive or uncomfortable messages',
-    },
-    {
-      'icon':  Icons.campaign_rounded,
-      'color': Color(0xFF0891B2),
-      'label': 'Spam or Promotion',
-      'sub':   'Repeated promotions or unwanted messages',
-    },
-    {
-      'icon':  Icons.money_off_rounded,
-      'color': Color(0xFFDC2626),
-      'label': 'Fraud or Scam Attempt',
-      'sub':   'Trying to cheat or defraud',
-    },
-    {
-      'icon':  Icons.engineering_rounded,
-      'color': Color(0xFF7C3AED),
-      'label': 'Unprofessional Behavior',
-      'sub':   'Inappropriate service behavior',
-    },
-    {
-      'icon':  Icons.shield_rounded,
-      'color': Color(0xFFDC2626),
-      'label': 'Safety Concern',
-      'sub':   'Feeling unsafe with this helper',
-    },
-    {
-      'icon':  Icons.credit_card_rounded,
-      'color': Color(0xFFD97706),
-      'label': 'Asking for Personal Information',
-      'sub':   'Requesting OTP, bank details, etc.',
-    },
-    {
-      'icon':  Icons.chat_bubble_outline_rounded,
-      'color': Color(0xFF6B7280),
-      'label': 'Irrelevant Messages',
-      'sub':   'Unrelated chat content',
-    },
-    {
-      'icon':  Icons.person_off_rounded,
-      'color': Color(0xFFDC2626),
-      'label': 'Fake Helper Identity',
-      'sub':   'Pretending to be a different helper',
-    },
-    {
-      'icon':  Icons.help_outline_rounded,
-      'color': Color(0xFF374151),
-      'label': 'Other',
-      'sub':   'Describe the issue below',
-    },
-  ];
-
-  @override
-  void dispose() {
-    _detailCtrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _submitReport() async {
-    if (_selectedReason == null) {
-      setState(() => _errorMsg = 'Please select a reason to continue.');
-      return;
-    }
-    if (_selectedReason == 9 && _detailCtrl.text.trim().isEmpty) {
-      setState(() => _errorMsg = 'Please describe the issue.');
-      return;
-    }
-
-    setState(() {
-      _isSubmitting = true;
-      _errorMsg     = null;
-    });
-
-    try {
-      final reason = _reasons[_selectedReason!]['label'] as String;
-      final detail = _detailCtrl.text.trim();
-
-      await FirebaseFirestore.instance.collection('chat_reports').add({
-        'reporterUserId': widget.reporterUserId,
-        'helperId':       widget.helperId,
-        'bookingId':      widget.bookingId,
-        'chatId':         widget.chatId,
-        'reason':         reason,
-        'detail':         detail.isNotEmpty ? detail : null,
-        'status':         'pending',
-        'timestamp':      FieldValue.serverTimestamp(),
-      });
-
-      final reportsSnap = await FirebaseFirestore.instance
-          .collection('chat_reports')
-          .where('helperId', isEqualTo: widget.helperId)
-          .where('status',   isEqualTo: 'pending')
-          .get();
-
-      if (reportsSnap.docs.length >= 3) {
-        await FirebaseFirestore.instance
-            .collection('helpers')
-            .doc(widget.helperId)
-            .set({
-          'flagged':        true,
-          'flagReason':     'Auto-flagged: 3+ chat reports',
-          'flaggedAt':      FieldValue.serverTimestamp(),
-          'pendingReports': reportsSnap.docs.length,
-        }, SetOptions(merge: true));
-      }
-
-      if (mounted) {
-        Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: const Row(children: [
-            Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
-            SizedBox(width: 10),
-            Expanded(
-                child: Text('Report submitted. Our team will review it.',
-                    style: TextStyle(fontWeight: FontWeight.w600))),
+                    fontSize: 13)),
           ]),
-          backgroundColor: const Color(0xFF059669),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12)),
-          margin:
-          const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        ));
-      }
-    } catch (e) {
-      setState(() {
-        _isSubmitting = false;
-        _errorMsg     = 'Failed to submit report. Try again.';
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return DraggableScrollableSheet(
-      initialChildSize: 0.85,
-      minChildSize:     0.5,
-      maxChildSize:     0.95,
-      expand: false,
-      builder: (_, ctrl) => Container(
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-        ),
-        child: Column(
-          children: [
-            Center(
-              child: Container(
-                margin: const EdgeInsets.symmetric(vertical: 12),
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                    color: const Color(0xFFE5E7EB),
-                    borderRadius: BorderRadius.circular(2)),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
-              child: Row(children: [
-                Container(
-                  width: 42,
-                  height: 42,
-                  decoration: BoxDecoration(
-                      color: const Color(0xFFFEE2E2),
-                      borderRadius: BorderRadius.circular(12)),
-                  child: const Icon(Icons.flag_rounded,
-                      color: Color(0xFFDC2626), size: 22),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('Report Helper',
-                          style: TextStyle(
-                              fontSize: 17,
-                              fontWeight: FontWeight.bold,
-                              color: Color(0xFF1F2937))),
-                      Text('Reporting: ${widget.helperName}',
-                          style: const TextStyle(
-                              fontSize: 12, color: Color(0xFF9CA3AF))),
-                    ],
-                  ),
-                ),
-              ]),
-            ),
-            const Divider(height: 1, color: Color(0xFFF3F4F6)),
-            Expanded(
-              child: ListView(
-                controller: ctrl,
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
-                children: [
-                  const Text('Select a reason',
-                      style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          color: Color(0xFF374151))),
-                  const SizedBox(height: 12),
-
-                  ...List.generate(_reasons.length, (i) {
-                    final r          = _reasons[i];
-                    final isSelected = _selectedReason == i;
-                    return GestureDetector(
-                      onTap: () => setState(() => _selectedReason = i),
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 180),
-                        margin: const EdgeInsets.only(bottom: 10),
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: isSelected
-                              ? (r['color'] as Color).withOpacity(0.06)
-                              : const Color(0xFFF9FAFB),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(
-                            color: isSelected
-                                ? (r['color'] as Color)
-                                : const Color(0xFFE5E7EB),
-                            width: isSelected ? 1.5 : 1,
-                          ),
-                        ),
-                        child: Row(children: [
-                          Container(
-                            width: 40,
-                            height: 40,
-                            decoration: BoxDecoration(
-                              color: (r['color'] as Color).withOpacity(0.10),
-                              borderRadius: BorderRadius.circular(11),
-                            ),
-                            child: Icon(r['icon'] as IconData,
-                                color: r['color'] as Color, size: 20),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(r['label'] as String,
-                                    style: TextStyle(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w600,
-                                        color: isSelected
-                                            ? r['color'] as Color
-                                            : const Color(0xFF1F2937))),
-                                const SizedBox(height: 2),
-                                Text(r['sub'] as String,
-                                    style: const TextStyle(
-                                        fontSize: 11,
-                                        color: Color(0xFF9CA3AF))),
-                              ],
-                            ),
-                          ),
-                          if (isSelected)
-                            Icon(Icons.check_circle_rounded,
-                                color: r['color'] as Color, size: 20),
-                        ]),
-                      ),
-                    );
-                  }),
-
-                  const SizedBox(height: 4),
-                  const Text('Additional details (optional)',
-                      style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          color: Color(0xFF374151))),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: _detailCtrl,
-                    maxLines:   3,
-                    maxLength:  300,
-                    style: const TextStyle(fontSize: 13),
-                    decoration: InputDecoration(
-                      hintText: 'Describe what happened in your own words...',
-                      hintStyle: const TextStyle(
-                          color: Color(0xFFADB5BD), fontSize: 13),
-                      filled:    true,
-                      fillColor: const Color(0xFFF9FAFB),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        borderSide:
-                        const BorderSide(color: Color(0xFFE5E7EB)),
-                      ),
-                      enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        borderSide:
-                        const BorderSide(color: Color(0xFFE5E7EB)),
-                      ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        borderSide: const BorderSide(
-                            color: Color(0xFFDC2626), width: 1.5),
-                      ),
-                      contentPadding: const EdgeInsets.all(14),
-                    ),
-                  ),
-
-                  if (_errorMsg != null) ...[
-                    const SizedBox(height: 8),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFEE2E2),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Row(children: [
-                        const Icon(Icons.error_outline_rounded,
-                            color: Color(0xFFDC2626), size: 15),
-                        const SizedBox(width: 8),
-                        Expanded(
-                            child: Text(_errorMsg!,
-                                style: const TextStyle(
-                                    fontSize: 12,
-                                    color: Color(0xFFDC2626)))),
-                      ]),
-                    ),
-                  ],
-
-                  const SizedBox(height: 20),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 52,
-                    child: ElevatedButton(
-                      onPressed: _isSubmitting ? null : _submitReport,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFDC2626),
-                        disabledBackgroundColor:
-                        const Color(0xFFDC2626).withOpacity(0.4),
-                        elevation: 0,
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(26)),
-                      ),
-                      child: _isSubmitting
-                          ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                              color: Colors.white, strokeWidth: 2.5))
-                          : const Text('Submit Report',
-                          style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white)),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
+          const SizedBox(height: 4),
+          Text('$jobCount+ jobs',
+              style: TextStyle(
+                  color: Colors.white.withOpacity(0.6), fontSize: 10)),
+        ]),
+      ]),
     );
   }
 }
@@ -1284,9 +1102,8 @@ class _ReportSheetState extends State<_ReportSheet> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _MessageBubble extends StatelessWidget {
-  final String text;
+  final String text, senderName;
   final bool   isMe;
-  final String senderName;
   final int    timestamp;
 
   const _MessageBubble({
@@ -1311,14 +1128,12 @@ class _MessageBubble extends StatelessWidget {
         children: [
           if (!isMe) ...[
             Container(
-              width: 28,
-              height: 28,
+              width: 28, height: 28,
               margin: const EdgeInsets.only(right: 6, bottom: 2),
               decoration: const BoxDecoration(
                 shape: BoxShape.circle,
                 gradient: LinearGradient(
-                  colors: [Color(0xFFA78BFA), Color(0xFF7C3AED)],
-                ),
+                    colors: [Color(0xFFA78BFA), Color(0xFF7C3AED)]),
               ),
               child: Center(
                 child: Text(
@@ -1340,15 +1155,13 @@ class _MessageBubble extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(
                       horizontal: 14, vertical: 10),
                   constraints: BoxConstraints(
-                    maxWidth: MediaQuery.of(context).size.width * 0.72,
-                  ),
+                      maxWidth: MediaQuery.of(context).size.width * 0.72),
                   decoration: BoxDecoration(
                     gradient: isMe
                         ? const LinearGradient(
-                      colors: [Color(0xFF7C3AED), Color(0xFF5B21B6)],
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                    )
+                        colors: [Color(0xFF7C3AED), Color(0xFF5B21B6)],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight)
                         : null,
                     color: isMe ? null : Colors.white,
                     borderRadius: BorderRadius.only(
@@ -1359,20 +1172,17 @@ class _MessageBubble extends StatelessWidget {
                     ),
                     boxShadow: [
                       BoxShadow(
-                        color:      Colors.black.withOpacity(0.06),
-                        blurRadius: 6,
-                        offset:     const Offset(0, 2),
-                      ),
+                          color: Colors.black.withOpacity(0.06),
+                          blurRadius: 6,
+                          offset: const Offset(0, 2)),
                     ],
                   ),
-                  child: Text(
-                    text,
-                    style: TextStyle(
-                      color:    isMe ? Colors.white : const Color(0xFF1F2937),
-                      fontSize: 14,
-                      height:   1.4,
-                    ),
-                  ),
+                  child: Text(text,
+                      style: TextStyle(
+                          color:
+                          isMe ? Colors.white : const Color(0xFF1F2937),
+                          fontSize: 14,
+                          height: 1.4)),
                 ),
                 const SizedBox(height: 3),
                 Text(time,
@@ -1466,8 +1276,7 @@ class _DateSeparator extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: Container(
-            padding:
-            const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
             decoration: BoxDecoration(
               color: const Color(0xFFF3F4F6),
               borderRadius: BorderRadius.circular(20),
@@ -1502,8 +1311,7 @@ class _EmptyChatState extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              width: 72,
-              height: 72,
+              width: 72, height: 72,
               decoration: const BoxDecoration(
                   color: Color(0xFFEDE9FE), shape: BoxShape.circle),
               child: const Icon(Icons.chat_bubble_outline_rounded,
@@ -1549,10 +1357,9 @@ class _ChatInputBar extends StatelessWidget {
         color: Colors.white,
         boxShadow: [
           BoxShadow(
-            color:      Colors.black.withOpacity(0.06),
-            blurRadius: 10,
-            offset:     const Offset(0, -3),
-          ),
+              color: Colors.black.withOpacity(0.06),
+              blurRadius: 10,
+              offset: const Offset(0, -3)),
         ],
       ),
       child: Row(
@@ -1566,10 +1373,10 @@ class _ChatInputBar extends StatelessWidget {
                 borderRadius: BorderRadius.circular(24),
               ),
               child: TextField(
-                controller:           controller,
-                maxLines:             null,
-                keyboardType:         TextInputType.multiline,
-                textCapitalization:   TextCapitalization.sentences,
+                controller:         controller,
+                maxLines:           null,
+                keyboardType:       TextInputType.multiline,
+                textCapitalization: TextCapitalization.sentences,
                 style: const TextStyle(fontSize: 14),
                 decoration: const InputDecoration(
                   hintText:  'Type a message...',
@@ -1585,8 +1392,7 @@ class _ChatInputBar extends StatelessWidget {
           GestureDetector(
             onTap: isSending ? null : onSend,
             child: Container(
-              width:  46,
-              height: 46,
+              width: 46, height: 46,
               decoration: BoxDecoration(
                 gradient: const LinearGradient(
                   colors: [Color(0xFF7C3AED), Color(0xFF5B21B6)],
@@ -1596,17 +1402,15 @@ class _ChatInputBar extends StatelessWidget {
                 shape: BoxShape.circle,
                 boxShadow: [
                   BoxShadow(
-                    color:      const Color(0xFF7C3AED).withOpacity(0.4),
-                    blurRadius: 8,
-                    offset:     const Offset(0, 3),
-                  ),
+                      color: const Color(0xFF7C3AED).withOpacity(0.4),
+                      blurRadius: 8,
+                      offset: const Offset(0, 3)),
                 ],
               ),
               child: isSending
                   ? const Center(
                 child: SizedBox(
-                  width:  18,
-                  height: 18,
+                  width: 18, height: 18,
                   child: CircularProgressIndicator(
                       color: Colors.white, strokeWidth: 2),
                 ),

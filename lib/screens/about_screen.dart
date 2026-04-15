@@ -1552,17 +1552,19 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
       final note = _noteController.text.trim();
 
       final reviewData = {
-        'bookingId': widget.bookingId,
-        'reviewerId': reviewerId,
-        'revieweeId': widget.revieweeId,
+        'bookingId':    widget.bookingId,
+        'reviewerId':   reviewerId,
+        'reviewerName': FirebaseAuth.instance.currentUser?.displayName ??
+            (isUserRole ? 'User' : 'Helper'),
+        'revieweeId':   widget.revieweeId,
         'revieweeName': widget.revieweeName,
-        'role': isUserRole ? 'user' : 'helper',
-        'starRating': _starRating,
-        'answers': _answers.map(
+        'role':         isUserRole ? 'user' : 'helper',
+        'starRating':   _starRating,
+        'answers':      _answers.map(
                 (k, v) => MapEntry(_questions[k].question, _questions[k].options[v])),
         if (note.isNotEmpty) 'additionalNote': note,
-        'serviceName': widget.serviceName,
-        'createdAt': FieldValue.serverTimestamp(),
+        'serviceName':  widget.serviceName,
+        'createdAt':    FieldValue.serverTimestamp(),
       };
 
       await FirebaseFirestore.instance
@@ -1693,16 +1695,18 @@ class _MutualReviewSheetState extends State<MutualReviewSheet>
             .doc(widget.revieweeId)
             .collection('reviews')
             .add({
-          'bookingId':   widget.bookingId,
-          'userId':      reviewerId,
-          'userName':    FirebaseAuth.instance.currentUser?.displayName ?? 'User',
-          'serviceName': widget.serviceName,
-          'starRating':  _starRating,
-          'answers':     _answers.map((k, v) =>
+          'bookingId':    widget.bookingId,
+          'userId':       reviewerId,
+          'reviewerId':   reviewerId,
+          'reviewerName': FirebaseAuth.instance.currentUser?.displayName ?? 'User',
+          'userName':     FirebaseAuth.instance.currentUser?.displayName ?? 'User',
+          'serviceName':  widget.serviceName,
+          'starRating':   _starRating,
+          'answers':      _answers.map((k, v) =>
               MapEntry(_questions[k].question, _questions[k].options[v])),
           if (_noteController.text.trim().isNotEmpty)
             'additionalNote': _noteController.text.trim(),
-          'createdAt':   FieldValue.serverTimestamp(),
+          'createdAt':    FieldValue.serverTimestamp(),
         });
       }
 

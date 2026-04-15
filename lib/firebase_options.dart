@@ -56,6 +56,7 @@ class DefaultFirebaseOptions {
     messagingSenderId: '241665118590',
     projectId: 'trouble-sarthi',
     storageBucket: 'trouble-sarthi.firebasestorage.app',
+    databaseURL: 'https://trouble-sarthi-default-rtdb.firebaseio.com', // ← ADDED
   );
 
   static const FirebaseOptions ios = FirebaseOptions(
@@ -65,6 +66,7 @@ class DefaultFirebaseOptions {
     projectId: 'trouble-sarthi',
     storageBucket: 'trouble-sarthi.firebasestorage.app',
     iosBundleId: 'com.example.troubleSarthi',
+    databaseURL: 'https://trouble-sarthi-default-rtdb.firebaseio.com', // ← ADDED
   );
 
   static const FirebaseOptions macos = FirebaseOptions(
@@ -74,6 +76,7 @@ class DefaultFirebaseOptions {
     projectId: 'trouble-sarthi',
     storageBucket: 'trouble-sarthi.firebasestorage.app',
     iosBundleId: 'com.example.troubleSarthi',
+    databaseURL: 'https://trouble-sarthi-default-rtdb.firebaseio.com', // ← ADDED
   );
 
   static const FirebaseOptions windows = FirebaseOptions(

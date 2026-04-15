@@ -1,5 +1,6 @@
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
+import 'package:firebase_core/firebase_core.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  REALTIME DATABASE SERVICE
@@ -18,7 +19,10 @@ class RealtimeDbService {
   RealtimeDbService._();
   static final RealtimeDbService instance = RealtimeDbService._();
 
-  final FirebaseDatabase _db = FirebaseDatabase.instance;
+  final FirebaseDatabase _db = FirebaseDatabase.instanceFor(
+    app: Firebase.app(),
+    databaseURL: 'https://trouble-sarthi-default-rtdb.firebaseio.com', // ← EXPLICIT URL
+  );
 
   // ── Send a message ────────────────────────────────────────────────────────
   Future<void> sendMessage({

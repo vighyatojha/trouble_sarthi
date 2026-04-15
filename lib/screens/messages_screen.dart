@@ -211,32 +211,51 @@ class _MessagesTab extends StatelessWidget {
       stream: FirebaseFirestore.instance
           .collection('chats')
           .where('participants', arrayContains: uid)
-          .orderBy('lastMessageTime', descending: true)
+      // ✅ REMOVED orderBy — no composite index needed now
           .snapshots(),
       builder: (context, snap) {
-        if (snap.connectionState == ConnectionState.waiting) {
+        // ✅ Only show spinner on very first load
+        if (snap.connectionState == ConnectionState.waiting && !snap.hasData) {
           return const Center(
               child: CircularProgressIndicator(
                   color: Color(0xFF7C3AED), strokeWidth: 2.5));
         }
 
-        final docs = snap.data?.docs ?? [];
-
-        if (docs.isEmpty) {
+        // ✅ On error, still show empty state (not broken UI)
+        if (snap.hasError) {
           return const _EmptyState(
             icon: Icons.chat_bubble_outline_rounded,
-            message:
-            'No messages yet\nConversations with helpers will appear here',
+            message: 'No messages yet\nConversations with helpers will appear here',
+          );
+        }
+
+        // ✅ Sort client-side instead of Firestore orderBy
+        final docs = snap.data?.docs ?? [];
+        final sorted = [...docs]..sort((a, b) {
+          final aData = a.data() as Map<String, dynamic>;
+          final bData = b.data() as Map<String, dynamic>;
+          final aTs = aData['lastMessageTime'] as Timestamp?;
+          final bTs = bData['lastMessageTime'] as Timestamp?;
+          if (aTs == null && bTs == null) return 0;
+          if (aTs == null) return 1;
+          if (bTs == null) return -1;
+          return bTs.compareTo(aTs); // descending
+        });
+
+        if (sorted.isEmpty) {
+          return const _EmptyState(
+            icon: Icons.chat_bubble_outline_rounded,
+            message: 'No messages yet\nConversations with helpers will appear here',
           );
         }
 
         return ListView.separated(
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 130),
-          itemCount: docs.length,
+          itemCount: sorted.length,
           separatorBuilder: (_, __) => const Divider(
               height: 1, indent: 72, color: Color(0xFFF0EEF8)),
           itemBuilder: (_, i) => _ConversationTile(
-            doc: docs[i],
+            doc: sorted[i],  // ✅ using sorted list
             currentUid: uid,
           ),
         );
@@ -514,7 +533,7 @@ class _NotificationsTabState extends State<_NotificationsTab> {
           .orderBy('createdAt', descending: true)
           .snapshots(),
       builder: (context, snap) {
-        if (snap.connectionState == ConnectionState.waiting) {
+        if (snap.connectionState == ConnectionState.waiting && !snap.hasData) {
           return const Center(
               child: CircularProgressIndicator(
                   color: Color(0xFF7C3AED), strokeWidth: 2.5));

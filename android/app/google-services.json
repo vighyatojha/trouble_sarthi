@@ -2,7 +2,8 @@
   "project_info": {
     "project_number": "241665118590",
     "project_id": "trouble-sarthi",
-    "storage_bucket": "trouble-sarthi.firebasestorage.app"
+    "storage_bucket": "trouble-sarthi.firebasestorage.app",
+    "firebase_url": "https://trouble-sarthi-default-rtdb.firebaseio.com"
   },
   "client": [
     {
