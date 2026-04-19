@@ -8,6 +8,12 @@ import '../service/realtime_db_service.dart';
 import 'about_screen.dart';
 import '../service/firestore_service.dart';
 import '../models/location_model.dart';
+import 'package:flutter/services.dart' show rootBundle;
+
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 
 
@@ -74,7 +80,11 @@ class BookingModel {
     switch (data['status'] as String? ?? 'booked') {
       case 'booked':      status = BookingStatus.booked;      break;
       case 'assigned':    status = BookingStatus.assigned;    break;
+    // ✅ FIX: helper side writes 'accepted' → map to assigned on user side
+      case 'accepted':    status = BookingStatus.assigned;    break;
       case 'arrived':     status = BookingStatus.arrived;     break;
+    // ✅ FIX: helper side writes 'ongoing' → map to inProgress on user side
+      case 'ongoing':     status = BookingStatus.inProgress;  break;
       case 'inProgress':  status = BookingStatus.inProgress;  break;
       case 'completed':   status = BookingStatus.completed;   break;
       case 'cancelled':   status = BookingStatus.cancelled;   break;
@@ -861,6 +871,7 @@ class _BookingsScreenState extends State<BookingsScreen>
                         bookings: current,
                         emptyLabel: 'No active or pending bookings',
                         isDemo: realBookings.isEmpty,
+                        isCurrent: true,          // ← enables live active section
                       ),
                       _BookingsList(
                         bookings: completed,
@@ -1021,6 +1032,182 @@ class _BookingsHeader extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// USER CURRENT JOB SECTION — mirrors helper's _OngoingJobSection
+// Shown at the top of the Current tab when any active booking exists.
+// Streams directly from Firestore so the timeline advances in real-time.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _UserCurrentJobSection extends StatelessWidget {
+  final BookingModel booking; // The most-active booking to feature
+  const _UserCurrentJobSection({required this.booking});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<DocumentSnapshot>(
+      stream: booking.firestoreId.isNotEmpty &&
+          !booking.firestoreId.startsWith('demo_')
+          ? FirebaseFirestore.instance
+          .collection('bookings')
+          .doc(booking.firestoreId)
+          .snapshots()
+          : null,
+      builder: (_, snap) {
+        // ── Resolve live data; fall back to local model while loading ───
+        String liveStatus = _normalizeBookingStatus(booking.status.name);
+        Map<String, DateTime?> timestamps = booking.statusTimestamps;
+        String helperName  = booking.helperName;
+        String serviceName = booking.serviceName;
+
+        if (snap.hasData && snap.data!.exists) {
+          final d = snap.data!.data() as Map<String, dynamic>?;
+          if (d != null) {
+            liveStatus = _normalizeBookingStatus(
+                d['status'] as String? ?? booking.status.name);
+            final rawTs =
+                d['statusTimestamps'] as Map<String, dynamic>? ?? {};
+            timestamps = rawTs.map((k, v) =>
+                MapEntry(k, v is Timestamp ? v.toDate() : null));
+            helperName  = d['helperName']  as String? ?? booking.helperName;
+            serviceName = d['serviceName'] as String? ?? booking.serviceName;
+          }
+        }
+
+        // Hide once the booking is no longer active
+        if (liveStatus == 'completed' || liveStatus == 'cancelled') {
+          return const SizedBox.shrink();
+        }
+
+        final chipColor = switch (liveStatus) {
+          'inProgress' => const Color(0xFF059669),
+          'arrived'    => const Color(0xFFD97706),
+          'assigned'   => const Color(0xFF7C3AED),
+          _            => const Color(0xFF7C3AED),
+        };
+
+        final chipLabel = switch (liveStatus) {
+          'inProgress' => 'IN PROGRESS',
+          'arrived'    => 'ARRIVED',
+          'assigned'   => 'ASSIGNED',
+          _            => 'BOOKED',
+        };
+
+        final sectionTitle =
+        liveStatus == 'inProgress' ? 'ONGOING BOOKING' : 'ACTIVE BOOKING';
+
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 18),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // ── Section header ──────────────────────────────────────
+              Row(children: [
+                Text(sectionTitle,
+                    style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF1F2937),
+                        letterSpacing: 0.4)),
+                const SizedBox(width: 8),
+                Container(
+                  padding:
+                  const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: chipColor.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(chipLabel,
+                      style: TextStyle(
+                          color: chipColor,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700)),
+                ),
+              ]),
+              const SizedBox(height: 10),
+
+              // ── Card with inline live timeline ──────────────────────
+              GestureDetector(
+                onTap: () => _openDetails(context, booking),
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: chipColor.withOpacity(0.25)),
+                    boxShadow: [
+                      BoxShadow(
+                          color: chipColor.withOpacity(0.12),
+                          blurRadius: 14,
+                          offset: const Offset(0, 4))
+                    ],
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Service + helper + View button
+                      Row(children: [
+                        Container(
+                          width: 44,
+                          height: 44,
+                          decoration: BoxDecoration(
+                            color: booking.serviceBgColor,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Icon(booking.serviceIcon,
+                              color: booking.serviceColor, size: 22),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(serviceName,
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 15,
+                                      color: Color(0xFF1F2937))),
+                              Text(helperName,
+                                  style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Color(0xFF6B7280))),
+                            ],
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: chipColor.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(20),
+                            border:
+                            Border.all(color: chipColor.withOpacity(0.3)),
+                          ),
+                          child: Text('View Details',
+                              style: TextStyle(
+                                  color: chipColor,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700)),
+                        ),
+                      ]),
+
+                      const SizedBox(height: 14),
+
+                      // Live inline timeline — same widget used by detail sheet
+                      BookingProgressTimeline(
+                        currentStatus: liveStatus,
+                        statusTimestamps: timestamps,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+// ─────────────────────────────────────────────────────────────────────────────
 // BOOKINGS LIST
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1028,25 +1215,52 @@ class _BookingsList extends StatelessWidget {
   final List<BookingModel> bookings;
   final String emptyLabel;
   final bool isDemo;
+  /// Set to true only for the "Current" tab — enables the live active-job section.
+  final bool isCurrent;
+
   const _BookingsList({
     required this.bookings,
     required this.emptyLabel,
     this.isDemo = false,
+    this.isCurrent = false,
   });
 
   @override
   Widget build(BuildContext context) {
     if (bookings.isEmpty) return _EmptyState(label: emptyLabel);
 
+    // ── Pick the most active booking to feature (arrived > inProgress > assigned) ─
+    final activeBooking = isCurrent && !isDemo
+        ? () {
+      final inProg = bookings.where((b) =>
+      b.status == BookingStatus.inProgress ||
+          b.status == BookingStatus.arrived);
+      if (inProg.isNotEmpty) return inProg.first;
+      final assigned =
+      bookings.where((b) => b.status == BookingStatus.assigned);
+      if (assigned.isNotEmpty) return assigned.first;
+      return null;
+    }()
+        : null;
+
+    final showActiveSection = activeBooking != null &&
+        activeBooking.firestoreId.isNotEmpty &&
+        !activeBooking.firestoreId.startsWith('demo_');
+
+    // Extra items: demo banner OR active section (never both, since hasActiveJob
+    // requires !isDemo)
+    final extraLeading = (isDemo || showActiveSection) ? 1 : 0;
+
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
-      itemCount: bookings.length + (isDemo ? 1 : 0),
+      itemCount: bookings.length + extraLeading,
       itemBuilder: (_, i) {
-        // Demo info banner at top
+        // ── Demo info banner ─────────────────────────────────────────────
         if (isDemo && i == 0) {
           return Container(
             margin: const EdgeInsets.only(bottom: 12),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            padding:
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
               color: const Color(0xFFFEF3C7),
               borderRadius: BorderRadius.circular(14),
@@ -1070,12 +1284,20 @@ class _BookingsList extends StatelessWidget {
           );
         }
 
-        final idx = isDemo ? i - 1 : i;
+        // ── Live active booking section (Current tab only) ───────────────
+        if (showActiveSection && i == 0) {
+          return _UserCurrentJobSection(booking: activeBooking!);
+        }
+
+        final idx = i - extraLeading;
+        if (idx < 0 || idx >= bookings.length) return const SizedBox.shrink();
         final b = bookings[idx];
+
         return Padding(
           padding: const EdgeInsets.only(bottom: 14),
           child: (b.status == BookingStatus.inProgress ||
-              b.status == BookingStatus.arrived)
+              b.status == BookingStatus.arrived ||
+              b.status == BookingStatus.assigned)
               ? _ActiveBookingCard(booking: b)
               : b.status == BookingStatus.completed
               ? _CompletedBookingCard(booking: b)
@@ -1106,7 +1328,7 @@ class _ActiveBookingCardState extends State<_ActiveBookingCard>
   void initState() {
     super.initState();
     _pulse = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 1200))
+        vsync: this, duration: const Duration(milliseconds: 1400))
       ..repeat(reverse: true);
   }
 
@@ -1116,217 +1338,300 @@ class _ActiveBookingCardState extends State<_ActiveBookingCard>
     super.dispose();
   }
 
+  // Status-aware label and color
+  String get _statusText {
+    switch (widget.booking.status) {
+      case BookingStatus.assigned:   return 'ACCEPTED';
+      case BookingStatus.arrived:    return 'ARRIVED';
+      case BookingStatus.inProgress: return 'IN PROGRESS';
+      default:                       return 'ACTIVE';
+    }
+  }
+
+  /// Maps a live Firestore status string → step 1-5 for the progress pill.
+  int _liveStep(String s) {
+    switch (s) {
+      case 'booked':
+      case 'pending':    return 1;
+      case 'accepted':   return 2;
+      case 'arrived':    return 3;
+      case 'ongoing':
+      case 'inProgress': return 4;
+      case 'completed':  return 5;
+      default:           return 1;
+    }
+  }
+
+  Color get _statusGlowColor {
+    switch (widget.booking.status) {
+      case BookingStatus.assigned:   return const Color(0xFF7C3AED);
+      case BookingStatus.arrived:    return const Color(0xFFD97706);
+      case BookingStatus.inProgress: return const Color(0xFF059669);
+      default:                       return const Color(0xFF7C3AED);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final b = widget.booking;
-    return GestureDetector(
-      onTap: () => _openDetails(context, b),
-      child: AnimatedBuilder(
-        animation: _pulse,
-        builder: (_, child) => Container(
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [
-                Color(0xFF2D0A6B),
-                Color(0xFF4B0FAA),
-                Color(0xFF6D28D9),
-              ],
-            ),
-            borderRadius: BorderRadius.circular(24),
-            boxShadow: [
-              BoxShadow(
-                color: const Color(0xFF7C3AED)
-                    .withOpacity(0.28 + 0.14 * _pulse.value),
-                blurRadius: 22 + 8 * _pulse.value,
-                offset: const Offset(0, 7),
-              ),
-            ],
-          ),
-          child: child,
-        ),
-        child: Stack(
-          children: [
-            // Decorative circles
-            Positioned(
-              right: -20,
-              top: -20,
-              child: Container(
-                width: 110,
-                height: 110,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.white.withOpacity(0.05),
+
+    // Use a live stream so card updates in real time
+    return StreamBuilder<DocumentSnapshot>(
+      stream: b.firestoreId.isNotEmpty && !b.firestoreId.startsWith('demo_')
+          ? FirebaseFirestore.instance
+          .collection('bookings')
+          .doc(b.firestoreId)
+          .snapshots()
+          : null,
+      builder: (context, snap) {
+        // Merge live data over local model
+        String liveStatusRaw = b.status == BookingStatus.assigned
+            ? 'accepted'
+            : b.status == BookingStatus.inProgress
+            ? 'ongoing'
+            : b.status.name;
+        if (snap.hasData && snap.data!.exists) {
+          liveStatusRaw =
+              (snap.data!.data() as Map<String, dynamic>?)?['status']
+              as String? ??
+                  liveStatusRaw;
+        }
+
+        // Map raw string → display label
+        final (statusLabel, dotColor) = switch (liveStatusRaw) {
+          'accepted'    => ('ACCEPTED', const Color(0xFFA78BFA)),
+          'arrived'     => ('ARRIVED',  const Color(0xFFFBBF24)),
+          'ongoing'     => ('IN PROGRESS', const Color(0xFF86EFAC)),
+          'inProgress'  => ('IN PROGRESS', const Color(0xFF86EFAC)),
+          'completed'   => ('COMPLETED', const Color(0xFF86EFAC)),
+          _             => ('BOOKED',   const Color(0xFFC4B5FD)),
+        };
+
+        return GestureDetector(
+          onTap: () => _openDetails(context, b),
+          child: AnimatedBuilder(
+            animation: _pulse,
+            builder: (_, child) => Container(
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    Color(0xFF1E0640),
+                    Color(0xFF3B0764),
+                    Color(0xFF5B21B6),
+                  ],
                 ),
-              ),
-            ),
-            Positioned(
-              left: -10,
-              bottom: -20,
-              child: Container(
-                width: 75,
-                height: 75,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.white.withOpacity(0.04),
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // ── Row 1: icon + service name + booking code chip ──────
-                  Row(
-                    children: [
-                      Container(
-                        width: 52,
-                        height: 52,
-                        decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.15),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(
-                              color: Colors.white.withOpacity(0.25)),
-                        ),
-                        child: Icon(b.serviceIcon,
-                            color: Colors.white, size: 26),
-                      ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(b.serviceName,
-                                style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 16)),
-                            const SizedBox(height: 5),
-                            Row(children: [
-                              _PulseDot(),
-                              const SizedBox(width: 6),
-                              Text(_statusLabel(b.status),
-                                  style: const TextStyle(
-                                      color: Color(0xFF86EFAC),
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                      letterSpacing: 1.1)),
-                            ]),
-                          ],
-                        ),
-                      ),
-                      _GlassChip(label: '#${b.id}'),
-                    ],
-                  ),
-                  const SizedBox(height: 18),
-                  Container(height: 1, color: Colors.white.withOpacity(0.15)),
-                  const SizedBox(height: 16),
-
-                  // ── Row 2: helper name + rating + employee ID ───────────
-                  _IconRow(
-                    icon: Icons.person_outline_rounded,
-                    child: Row(children: [
-                      Text(b.helperName,
-                          style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w600,
-                              fontSize: 13)),
-                      if (b.helperRating != null) ...[
-                        const SizedBox(width: 8),
-                        const Icon(Icons.star_rounded,
-                            color: Color(0xFFFBBF24), size: 13),
-                        const SizedBox(width: 3),
-                        Text('${b.helperRating}',
-                            style: const TextStyle(
-                                color: Color(0xFFFBBF24),
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold)),
-                      ],
-                      const Spacer(),
-                      if (b.helperEmployeeId != null)
-                        Text(b.helperEmployeeId!,
-                            style: TextStyle(
-                                color: Colors.white.withOpacity(0.5),
-                                fontSize: 10)),
-                    ]),
-                  ),
-                  const SizedBox(height: 8),
-
-                  // ── Row 3: address ──────────────────────────────────────
-                  _IconRow(
-                    icon: Icons.location_on_outlined,
-                    child: Text(b.address,
-                        style: TextStyle(
-                            color: Colors.white.withOpacity(0.75),
-                            fontSize: 12),
-                        overflow: TextOverflow.ellipsis),
-                  ),
-                  const SizedBox(height: 6),
-
-                  // ── Row 4: scheduled time ───────────────────────────────
-                  _IconRow(
-                    icon: Icons.access_time_rounded,
-                    child: Text(
-                        '${_formatDate(b.scheduledAt)} · ${_formatTime(b.scheduledAt)}',
-                        style: TextStyle(
-                            color: Colors.white.withOpacity(0.75),
-                            fontSize: 12)),
-                  ),
-                  const SizedBox(height: 10),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 10, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.08),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.timeline_rounded,
-                            color: Color(0xFFC4B5FD), size: 12),
-                        const SizedBox(width: 5),
-                        Text(
-                          'Step ${_statusStep(b.status)} of 5  ·  ${_statusLabel(b.status)}',
-                          style: const TextStyle(
-                            color: Color(0xFFC4B5FD),
-                            fontSize: 10,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-
-                  // ── Row 5: Track Helper + View Details ──────────────────
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _OutlineButton(
-                          label: 'Track Helper',
-                          icon: Icons.near_me_outlined,
-                          onTap: () {},
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: _FilledButton(
-                          label: 'View Details',
-                          icon: Icons.info_outline_rounded,
-                          onTap: () => _openDetails(context, b),
-                        ),
-                      ),
-                    ],
+                borderRadius: BorderRadius.circular(24),
+                boxShadow: [
+                  BoxShadow(
+                    color: _statusGlowColor
+                        .withOpacity(0.22 + 0.12 * _pulse.value),
+                    blurRadius: 20 + 8 * _pulse.value,
+                    offset: const Offset(0, 8),
                   ),
                 ],
               ),
+              child: child,
             ),
-          ],
-        ),
-      ),
+            child: Stack(
+              children: [
+                // Decorative blobs
+                Positioned(
+                  right: -24, top: -24,
+                  child: Container(
+                    width: 120, height: 120,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.white.withOpacity(0.05),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  left: -16, bottom: -24,
+                  child: Container(
+                    width: 80, height: 80,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.white.withOpacity(0.04),
+                    ),
+                  ),
+                ),
+
+                Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+
+                      // ── Row 1: icon + name + status + booking code ──────
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            width: 54, height: 54,
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.14),
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(
+                                  color: Colors.white.withOpacity(0.22)),
+                            ),
+                            child: Icon(b.serviceIcon,
+                                color: Colors.white, size: 26),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(b.serviceName,
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 17)),
+                                const SizedBox(height: 6),
+                                Row(children: [
+                                  // Animated dot
+                                  AnimatedBuilder(
+                                    animation: _pulse,
+                                    builder: (_, __) => Container(
+                                      width: 7, height: 7,
+                                      decoration: BoxDecoration(
+                                        color: Color.lerp(
+                                            dotColor,
+                                            Colors.white,
+                                            _pulse.value * 0.4),
+                                        shape: BoxShape.circle,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(statusLabel,
+                                      style: TextStyle(
+                                          color: dotColor,
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.bold,
+                                          letterSpacing: 1.1)),
+                                ]),
+                              ],
+                            ),
+                          ),
+                          _GlassChip(label: '#${b.id}'),
+                        ],
+                      ),
+
+                      const SizedBox(height: 18),
+                      Container(height: 1,
+                          color: Colors.white.withOpacity(0.15)),
+                      const SizedBox(height: 16),
+
+                      // ── Row 2: helper + rating + employee ID ───────────
+                      _IconRow(
+                        icon: Icons.person_outline_rounded,
+                        child: Row(children: [
+                          Text(b.helperName,
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 13)),
+                          if (b.helperRating != null) ...[
+                            const SizedBox(width: 8),
+                            const Icon(Icons.star_rounded,
+                                color: Color(0xFFFBBF24), size: 13),
+                            const SizedBox(width: 3),
+                            Text('${b.helperRating}',
+                                style: const TextStyle(
+                                    color: Color(0xFFFBBF24),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold)),
+                          ],
+                          const Spacer(),
+                          if (b.helperEmployeeId != null)
+                            Text(b.helperEmployeeId!,
+                                style: TextStyle(
+                                    color: Colors.white.withOpacity(0.45),
+                                    fontSize: 10)),
+                        ]),
+                      ),
+                      const SizedBox(height: 8),
+
+                      // ── Row 3: address ─────────────────────────────────
+                      _IconRow(
+                        icon: Icons.location_on_outlined,
+                        child: Text(b.address,
+                            style: TextStyle(
+                                color: Colors.white.withOpacity(0.75),
+                                fontSize: 12),
+                            overflow: TextOverflow.ellipsis),
+                      ),
+                      const SizedBox(height: 6),
+
+                      // ── Row 4: date + time ─────────────────────────────
+                      _IconRow(
+                        icon: Icons.access_time_rounded,
+                        child: Text(
+                            '${_formatDate(b.scheduledAt)} · ${_formatTime(b.scheduledAt)}',
+                            style: TextStyle(
+                                color: Colors.white.withOpacity(0.75),
+                                fontSize: 12)),
+                      ),
+                      const SizedBox(height: 12),
+
+                      // ── Progress indicator pill ────────────────────────
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 7),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.09),
+                          borderRadius: BorderRadius.circular(22),
+                          border: Border.all(
+                              color: Colors.white.withOpacity(0.15)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.timeline_rounded,
+                                color: Color(0xFFC4B5FD), size: 13),
+                            const SizedBox(width: 6),
+                            Text(
+                              'Step ${_liveStep(liveStatusRaw)} of 5  ·  $statusLabel',
+                              style: const TextStyle(
+                                color: Color(0xFFC4B5FD),
+                                fontSize: 10,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+
+                      // ── Action buttons ─────────────────────────────────
+                      Row(children: [
+                        Expanded(
+                          child: _OutlineButton(
+                            label: 'Track Helper',
+                            icon: Icons.near_me_outlined,
+                            onTap: () {},
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: _FilledButton(
+                            label: 'View Details',
+                            icon: Icons.info_outline_rounded,
+                            onTap: () => _openDetails(context, b),
+                          ),
+                        ),
+                      ]),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -1397,9 +1702,9 @@ String _statusLabel(BookingStatus s) {
 int _statusStep(BookingStatus s) {
   switch (s) {
     case BookingStatus.booked:     return 1;
-    case BookingStatus.assigned:   return 2;
+    case BookingStatus.assigned:   return 2; // 'accepted' maps here
     case BookingStatus.arrived:    return 3;
-    case BookingStatus.inProgress: return 4;
+    case BookingStatus.inProgress: return 4; // 'ongoing' maps here
     case BookingStatus.completed:  return 5;
     case BookingStatus.cancelled:  return 0;
   }
@@ -1459,14 +1764,33 @@ class BookingProgressTimeline extends StatelessWidget {
     required this.statusTimestamps,
   });
 
+  // ✅ FIX: normalize helper-side status strings to user-side keys
+  static String _normalize(String s) {
+    switch (s) {
+      case 'accepted':   return 'assigned';
+      case 'ongoing':    return 'inProgress';
+      default:           return s;
+    }
+  }
+
   int get _currentIndex {
-    final idx = _kStatusOrder.indexOf(currentStatus);
+    final normalized = _normalize(currentStatus);
+    final idx = _kStatusOrder.indexOf(normalized);
     return idx < 0 ? 0 : idx;
+  }
+
+  // ✅ FIX: normalize timestamp keys too so timestamps show correctly
+  Map<String, DateTime?> get _normalizedTimestamps {
+    final out = <String, DateTime?>{};
+    statusTimestamps.forEach((k, v) => out[_normalize(k)] = v);
+    return out;
   }
 
   @override
   Widget build(BuildContext context) {
-    final ci = _currentIndex;
+    final ci  = _currentIndex;
+    final tss = _normalizedTimestamps;
+
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
@@ -1495,12 +1819,12 @@ class BookingProgressTimeline extends StatelessWidget {
           ),
           const SizedBox(height: 14),
           ...List.generate(_kCheckpoints.length, (i) {
-            final cp       = _kCheckpoints[i];
-            final isDone   = i < ci;
+            final cp        = _kCheckpoints[i];
+            final isDone    = i < ci;
             final isCurrent = i == ci;
-            final isFuture = i > ci;
-            final ts       = statusTimestamps[cp.key];
-            final isLast   = i == _kCheckpoints.length - 1;
+            final isFuture  = i > ci;
+            final ts        = tss[cp.key];
+            final isLast    = i == _kCheckpoints.length - 1;
 
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1508,15 +1832,13 @@ class BookingProgressTimeline extends StatelessWidget {
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    // Icon circle
                     if (isCurrent)
                       _PulsingCheckpoint(color: cp.color)
                     else
                       Opacity(
                         opacity: isFuture ? 0.35 : 1.0,
                         child: Container(
-                          width: 32,
-                          height: 32,
+                          width: 32, height: 32,
                           decoration: BoxDecoration(
                             color: isDone
                                 ? cp.color.withOpacity(0.12)
@@ -1535,7 +1857,6 @@ class BookingProgressTimeline extends StatelessWidget {
                         ),
                       ),
                     const SizedBox(width: 12),
-                    // Label
                     Expanded(
                       child: Opacity(
                         opacity: isFuture ? 0.4 : 1.0,
@@ -1553,7 +1874,6 @@ class BookingProgressTimeline extends StatelessWidget {
                         ),
                       ),
                     ),
-                    // Timestamp
                     if (ts != null)
                       Text(
                         '${_formatDate(ts)}\n${_formatTime(ts)}',
@@ -1566,13 +1886,11 @@ class BookingProgressTimeline extends StatelessWidget {
                       ),
                   ],
                 ),
-                // Connector line
                 if (!isLast)
                   Padding(
                     padding: const EdgeInsets.only(left: 15),
                     child: Container(
-                      width: 2,
-                      height: 22,
+                      width: 2, height: 22,
                       color: i < ci
                           ? _kCheckpoints[i + 1].color.withOpacity(0.25)
                           : const Color(0xFFE5E7EB),
@@ -2170,17 +2488,17 @@ class _CompletedBookingCard extends StatelessWidget {
                   ),
                   const Spacer(),
                   _SmallButton(
-                    label: 'Rebook',
-                    icon: Icons.replay_rounded,
-                    color: b.serviceColor,
-                    onTap: () {},
+                    label: 'Details',
+                    icon: Icons.info_outline_rounded,
+                    color: const Color(0xFF7C3AED),
+                    onTap: () => _openDetails(context, b),
                   ),
                   const SizedBox(width: 8),
                   _SmallButton(
-                    label: 'Invoice',
-                    icon: Icons.download_outlined,
-                    color: const Color(0xFF6B7280),
-                    onTap: () {},
+                    label: 'Print Receipt',
+                    icon: Icons.print_rounded,
+                    color: const Color(0xFF059669),
+                    onTap: () => _downloadReceipt(context, b),
                   ),
                 ],
               ),
@@ -2788,29 +3106,42 @@ class _BookingDetailsSheet extends StatelessWidget {
             const SizedBox(height: 14),
             const SizedBox(height: 14),
             // ── Live booking progress timeline ──────────────────────────
-            if (b.firestoreId.isNotEmpty && !b.firestoreId.startsWith('demo_'))
-              StreamBuilder<DocumentSnapshot>(
-                stream: FirebaseFirestore.instance
+            Padding(
+              padding: const EdgeInsets.only(bottom: 14),
+              child: StreamBuilder<DocumentSnapshot>(
+                stream: b.firestoreId.isNotEmpty &&
+                    !b.firestoreId.startsWith('demo_')
+                    ? FirebaseFirestore.instance
                     .collection('bookings')
                     .doc(b.firestoreId)
-                    .snapshots(),
+                    .snapshots()
+                    : null,
                 builder: (_, snap) {
-                  if (!snap.hasData) return const SizedBox.shrink();
-                  final d = snap.data!.data() as Map<String, dynamic>?;
-                  if (d == null) return const SizedBox.shrink();
-                  final rawTs =
-                      d['statusTimestamps'] as Map<String, dynamic>? ?? {};
-                  final timestamps = rawTs.map((k, v) =>
-                      MapEntry(k, v is Timestamp ? v.toDate() : null));
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 14),
-                    child: BookingProgressTimeline(
-                      currentStatus: d['status'] as String? ?? 'booked',
-                      statusTimestamps: timestamps,
-                    ),
+                  // Show local model data immediately (no blank gap on first load)
+                  Map<String, DateTime?> timestamps = b.statusTimestamps;
+                  String normalizedStatus =
+                  _normalizeBookingStatus(b.status.name);
+
+                  if (snap.hasData && snap.data!.exists) {
+                    final d = snap.data!.data() as Map<String, dynamic>?;
+                    if (d != null) {
+                      final rawTs =
+                          d['statusTimestamps'] as Map<String, dynamic>? ?? {};
+                      // Pass raw keys — BookingProgressTimeline normalises internally
+                      timestamps = rawTs.map((k, v) =>
+                          MapEntry(k, v is Timestamp ? v.toDate() : null));
+                      normalizedStatus = _normalizeBookingStatus(
+                          d['status'] as String? ?? b.status.name);
+                    }
+                  }
+
+                  return BookingProgressTimeline(
+                    currentStatus: normalizedStatus,
+                    statusTimestamps: timestamps,
                   );
                 },
               ),
+            ),
             _DetailSection(
               child: Column(
                 children: [
@@ -2923,182 +3254,210 @@ class _BookingDetailsSheet extends StatelessWidget {
             ),
             const SizedBox(height: 24),
 
-            // ── CHANGED: bottom action buttons ────────────────────────────
-            // ── Action buttons based on current status ─────────────────────
-            if (b.status == BookingStatus.booked ||
-                b.status == BookingStatus.assigned) ...[
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () async {
-                        await _confirmCancel(ctx, b);
-                        if (ctx.mounted) Navigator.pop(ctx);
-                      },
-                      style: OutlinedButton.styleFrom(
-                        side: const BorderSide(color: Color(0xFFE5E7EB)),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16)),
-                        padding: const EdgeInsets.symmetric(vertical: 14),
+            // ── LIVE action buttons — react to every Firestore status change ──────────────
+            StreamBuilder<DocumentSnapshot>(
+              stream: b.firestoreId.isNotEmpty && !b.firestoreId.startsWith('demo_')
+                  ? FirebaseFirestore.instance
+                  .collection('bookings')
+                  .doc(b.firestoreId)
+                  .snapshots()
+                  : null,
+              builder: (_, liveSnap) {
+                // ── Resolve live BookingStatus (fall back to local model while loading) ──
+                BookingStatus liveStatus = b.status;
+                bool liveReviewDone = b.userReviewDone;
+                if (liveSnap.hasData && liveSnap.data!.exists) {
+                  final ld = liveSnap.data!.data() as Map<String, dynamic>?;
+                  if (ld != null) {
+                    switch (ld['status'] as String? ?? '') {
+                      case 'booked':      liveStatus = BookingStatus.booked;      break;
+                      case 'accepted':    liveStatus = BookingStatus.assigned;    break;
+                      case 'assigned':    liveStatus = BookingStatus.assigned;    break;
+                      case 'arrived':     liveStatus = BookingStatus.arrived;     break;
+                      case 'ongoing':     liveStatus = BookingStatus.inProgress;  break;
+                      case 'inProgress':  liveStatus = BookingStatus.inProgress;  break;
+                      case 'completed':   liveStatus = BookingStatus.completed;   break;
+                      case 'cancelled':   liveStatus = BookingStatus.cancelled;   break;
+                    }
+                    liveReviewDone = ld['userReviewDone'] as bool? ?? b.userReviewDone;
+                  }
+                }
+
+                // ── BOOKED or ASSIGNED → Cancel + Edit ────────────────────────────────
+                if (liveStatus == BookingStatus.booked ||
+                    liveStatus == BookingStatus.assigned) {
+                  return Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () async {
+                            await _confirmCancel(ctx, b);
+                            if (ctx.mounted) Navigator.pop(ctx);
+                          },
+                          style: OutlinedButton.styleFrom(
+                            side: const BorderSide(color: Color(0xFFE5E7EB)),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16)),
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                          ),
+                          child: const Text('Cancel Request',
+                              style: TextStyle(
+                                  color: Color(0xFF6B7280),
+                                  fontWeight: FontWeight.w600)),
+                        ),
                       ),
-                      child: const Text('Cancel Request',
-                          style: TextStyle(
-                              color: Color(0xFF6B7280),
-                              fontWeight: FontWeight.w600)),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: () {
+                            Navigator.pop(ctx);
+                            _openEditSheet(context, b);
+                          },
+                          icon: const Icon(Icons.edit_outlined,
+                              size: 16, color: Colors.white),
+                          label: const Text('Edit Request',
+                              style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF7C3AED),
+                            elevation: 0,
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16)),
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                }
+
+                // ── ARRIVED or IN-PROGRESS → Service Done & Pay ───────────────────────
+                if (liveStatus == BookingStatus.arrived ||
+                    liveStatus == BookingStatus.inProgress) {
+                  return SizedBox(
+                    width: double.infinity,
                     child: ElevatedButton.icon(
                       onPressed: () {
-                        Navigator.pop(ctx);
-                        _openEditSheet(context, b);
-                      },
-                      icon: const Icon(Icons.edit_outlined,
-                          size: 16, color: Colors.white),
-                      label: const Text('Edit Request',
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold)),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF7C3AED),
-                        elevation: 0,
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16)),
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ] else if (b.status == BookingStatus.arrived ||
-                b.status == BookingStatus.inProgress) ...[
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: () {
-                    if (b.firestoreId.isEmpty ||
-                        b.firestoreId.startsWith('demo_')) {
-                      ScaffoldMessenger.of(ctx).showSnackBar(
-                        const SnackBar(
-                          content: Text('Demo booking — cannot mark complete'),
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
-                      return;
-                    }
-                    if (b.userReviewDone) {
-                      ScaffoldMessenger.of(ctx).showSnackBar(
-                        const SnackBar(
-                          content: Text('Review already submitted for this booking'),
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
-                      return;
-                    }
-                    // Capture root navigator BEFORE opening nested sheet
-                    final rootNav = Navigator.of(ctx, rootNavigator: true);
-                    showModalBottomSheet(
-                      context: ctx,
-                      isScrollControlled: true,
-                      backgroundColor: Colors.transparent,
-                      useSafeArea: true,
-                      useRootNavigator: true,
-                      builder: (_) => _PaymentConfirmSheet(
-                        booking: b,
-                        onConfirmed: () {
-                          rootNav.pop();
-                          Future.delayed(
-                            const Duration(milliseconds: 350),
-                                () {
-                              final chatId = b.firestoreId.isNotEmpty
-                                  ? b.firestoreId
-                                  : b.id;
-                              MutualReviewSheet.showForUser(
-                                rootNav.context,
-                                bookingId:   chatId,
-                                helperId:    b.helperId ?? '',
-                                helperName:  b.helperName,
-                                serviceName: b.serviceName,
-                                onAfterClose: () {
-                                  RealtimeDbService.instance
-                                      .deleteChat(chatId)
-                                      .then((_) {
-                                    FirebaseFirestore.instance
-                                        .collection('chats')
-                                        .doc(chatId)
-                                        .update({'bookingStatus': 'review_done'})
-                                        .catchError((_) {});
-                                  });
-                                },
-                              );
+                        if (b.firestoreId.isEmpty ||
+                            b.firestoreId.startsWith('demo_')) {
+                          ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
+                            content: Text('Demo booking — cannot mark complete'),
+                            behavior: SnackBarBehavior.floating,
+                          ));
+                          return;
+                        }
+                        if (liveReviewDone) {
+                          ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
+                            content: Text('Review already submitted for this booking'),
+                            behavior: SnackBarBehavior.floating,
+                          ));
+                          return;
+                        }
+                        final rootNav = Navigator.of(ctx, rootNavigator: true);
+                        showModalBottomSheet(
+                          context: ctx,
+                          isScrollControlled: true,
+                          backgroundColor: Colors.transparent,
+                          useSafeArea: true,
+                          useRootNavigator: true,
+                          builder: (_) => _PaymentConfirmSheet(
+                            booking: b,
+                            onConfirmed: () {
+                              rootNav.pop();
+                              Future.delayed(const Duration(milliseconds: 350), () {
+                                final chatId = b.firestoreId.isNotEmpty
+                                    ? b.firestoreId
+                                    : b.id;
+                                MutualReviewSheet.showForUser(
+                                  rootNav.context,
+                                  bookingId:    chatId,
+                                  helperId:     b.helperId ?? '',
+                                  helperName:   b.helperName,
+                                  serviceName:  b.serviceName,
+                                  onAfterClose: () {
+                                    RealtimeDbService.instance
+                                        .deleteChat(chatId)
+                                        .then((_) {
+                                      FirebaseFirestore.instance
+                                          .collection('chats')
+                                          .doc(chatId)
+                                          .update({'bookingStatus': 'review_done'})
+                                          .catchError((_) {});
+                                    });
+                                  },
+                                );
+                              });
                             },
-                          );
-                        },
-                      ),
-                    );
-                  },
-                  icon: const Icon(Icons.verified_rounded,
-                      size: 18, color: Colors.white),
-                  label: const Text('Service Done & Pay',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 15)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF059669),
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16)),
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                  ),
-                ),
-              ),
-            ] else if (b.status == BookingStatus.completed) ...[
-              Row(
-                children: [
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: () {},
-                      icon: const Icon(Icons.replay_rounded,
-                          size: 16, color: Colors.white),
-                      label: const Text('Rebook Service',
+                          ),
+                        );
+                      },
+                      icon: const Icon(Icons.verified_rounded,
+                          size: 18, color: Colors.white),
+                      label: const Text('Service Done & Pay',
                           style: TextStyle(
                               color: Colors.white,
-                              fontWeight: FontWeight.bold)),
+                              fontWeight: FontWeight.bold,
+                              fontSize: 15)),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF7C3AED),
+                        backgroundColor: const Color(0xFF059669),
                         elevation: 0,
                         shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(16)),
-                        padding:
-                        const EdgeInsets.symmetric(vertical: 14),
+                        padding: const EdgeInsets.symmetric(vertical: 16),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () {},
-                      icon: const Icon(Icons.help_outline_rounded,
-                          size: 16, color: Color(0xFF6B7280)),
-                      label: const Text('Get Support',
-                          style: TextStyle(
-                              color: Color(0xFF6B7280),
-                              fontWeight: FontWeight.w600)),
-                      style: OutlinedButton.styleFrom(
-                        side:
-                        const BorderSide(color: Color(0xFFE5E7EB)),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16)),
-                        padding:
-                        const EdgeInsets.symmetric(vertical: 14),
+                  );
+                }
+
+                // ── COMPLETED → Details + Print Receipt ───────────────────────────────
+                if (liveStatus == BookingStatus.completed) {
+                  return Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: () {},
+                          icon: const Icon(Icons.replay_rounded,
+                              size: 16, color: Colors.white),
+                          label: const Text('Details',
+                              style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF7C3AED),
+                            elevation: 0,
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16)),
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                          ),
+                        ),
                       ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: () => _downloadReceipt(ctx, b),
+                          icon: const Icon(Icons.print_rounded,
+                              size: 16, color: Colors.white),
+                          label: const Text('Print Receipt',
+                              style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF059669),
+                            elevation: 0,
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16)),
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                }
+
+                return const SizedBox.shrink();
+              },
+            ),
           ],
         ),
       ),
@@ -4370,4 +4729,535 @@ String _formatTime(DateTime dt) {
   final m = dt.minute.toString().padLeft(2, '0');
   final period = dt.hour >= 12 ? 'PM' : 'AM';
   return '$h:$m $period';
+}
+
+/// Normalises any Firestore status string (helper-side or user-side)
+/// to the canonical keys used by [BookingProgressTimeline] / [_kStatusOrder].
+String _normalizeBookingStatus(String s) {
+  switch (s) {
+    case 'accepted':  return 'assigned';
+    case 'ongoing':   return 'inProgress';
+    case 'active':    return 'inProgress';
+    case 'pending':   return 'booked';
+    default:          return s;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PDF RECEIPT GENERATION
+// ─────────────────────────────────────────────────────────────────────────────
+
+Future<void> _downloadReceipt(BuildContext context, BookingModel b) async {
+  try {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Row(children: [
+        SizedBox(width: 18, height: 18,
+            child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)),
+        SizedBox(width: 12),
+        Text('Generating receipt…'),
+      ]),
+      duration: Duration(seconds: 2),
+      behavior: SnackBarBehavior.floating,
+    ));
+
+    final doc   = await _buildReceiptPdf(b);
+    final bytes = await doc.save();
+
+    await Printing.sharePdf(
+      bytes:    bytes,
+      filename: 'TroubleSarthi_Receipt_${b.id}.pdf',
+    );
+  } catch (e) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Could not generate receipt: $e'),
+        backgroundColor: const Color(0xFFDC2626),
+        behavior: SnackBarBehavior.floating,
+      ));
+    }
+  }
+}
+
+Future<pw.Document> _buildReceiptPdf(BookingModel b) async {
+  // ── Load fonts ──────────────────────────────────────────────────────────
+  pw.Font? samanFont;
+  try {
+    final samanData = await rootBundle.load('assets/fonts/SAMAN___.TTF');
+    samanFont = pw.Font.ttf(samanData);
+  } catch (_) {
+    samanFont = null;
+  }
+  final bodyReg    = await PdfGoogleFonts.notoSansRegular();
+  final bodyBold   = await PdfGoogleFonts.notoSansBold();
+  final bodyItalic = await PdfGoogleFonts.notoSansItalic();
+
+  // ── Colours ─────────────────────────────────────────────────────────────
+  final darkGreen = PdfColor.fromHex('#1B3A2D');
+  final midGreen  = PdfColor.fromHex('#224433');
+  final gold      = PdfColor.fromHex('#C9A84C');
+  final goldLight = PdfColor.fromHex('#E2C97E');
+  final cream     = PdfColor.fromHex('#F5EDD8');
+  final creamDark = PdfColor.fromHex('#D9C9A3');
+  final textDark  = PdfColor.fromHex('#1A1A1A');
+  final textGrey  = PdfColor.fromHex('#555555');
+
+  // ── Data ────────────────────────────────────────────────────────────────
+  final pdf       = pw.Document();
+  final receiptNo = b.id.isNotEmpty
+      ? b.id
+      : 'TS-${DateTime.now().millisecondsSinceEpoch.toString().substring(7)}';
+  final userName = FirebaseAuth.instance.currentUser?.displayName ?? 'Customer';
+  final now      = DateTime.now();
+  final dateStr  = _formatDate(b.completedAt ?? now);
+  final timeStr  = _formatTime(b.completedAt ?? now);
+  final total    = b.totalAmount ?? b.baseAmount;
+  final payMode  = b.paymentConfirmed ? 'UPI Payment' : 'Cash Payment';
+
+  // ── Helper: styled text ─────────────────────────────────────────────────
+  pw.TextStyle ts({
+    pw.Font? font,
+    double size = 11,
+    PdfColor? color,
+    pw.FontWeight? weight,
+    double? spacing,
+  }) =>
+      pw.TextStyle(
+        font:          font ?? bodyReg,
+        fontSize:      size,
+        color:         color ?? textDark,
+        fontWeight:    weight,
+        letterSpacing: spacing,
+      );
+
+  pw.Widget divider({PdfColor? c, double h = 1}) =>
+      pw.Container(height: h, color: c ?? gold);
+
+  pw.Widget cell({
+    required pw.Widget child,
+    PdfColor? bg,
+    pw.EdgeInsets? pad,
+    pw.BoxDecoration? decoration,
+  }) =>
+      pw.Container(
+        padding:    pad ?? const pw.EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: decoration ?? pw.BoxDecoration(color: bg ?? PdfColors.white),
+        child:      child,
+      );
+
+  pdf.addPage(
+    pw.Page(
+      pageFormat: PdfPageFormat.a4,
+      margin:     pw.EdgeInsets.zero,
+      build: (ctx) => pw.Container(
+        width:  double.infinity,
+        height: double.infinity,
+        color:  darkGreen,
+        child:  pw.Padding(
+          padding: const pw.EdgeInsets.all(20),
+          child: pw.Container(
+            decoration: pw.BoxDecoration(
+              border: pw.Border.all(color: gold, width: 2),
+            ),
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+              children: [
+
+                // ══════════════════════════════════════════════════
+                // HEADER
+                // ══════════════════════════════════════════════════
+                pw.Container(
+                  color:   darkGreen,
+                  padding: const pw.EdgeInsets.fromLTRB(24, 24, 24, 16),
+                  child: pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.center,
+                    children: [
+                      // Brand name — Saman font
+                      pw.Text(
+                        'trouble sarthi',
+                        textAlign: pw.TextAlign.center,
+                        style: pw.TextStyle(
+                          font:       samanFont,
+                          fontSize:   40,
+                          color:      PdfColors.white,
+                        ),
+                      ),
+                      pw.SizedBox(height: 6),
+                      // Tagline
+                      pw.Text(
+                        'On-Demand Helper Service for Your Troubles',
+                        textAlign: pw.TextAlign.center,
+                        style: ts(size: 10, color: PdfColors.white),
+                      ),
+                      pw.SizedBox(height: 16),
+                      // ─ PAYMENT RECEIPT ─
+                      pw.Row(
+                        mainAxisAlignment: pw.MainAxisAlignment.center,
+                        children: [
+                          pw.Container(width: 55, height: 1, color: gold),
+                          pw.SizedBox(width: 10),
+                          pw.Text(
+                            'PAYMENT RECEIPT',
+                            style: ts(
+                              font:    bodyBold,
+                              size:    12,
+                              color:   gold,
+                              spacing: 2.5,
+                            ),
+                          ),
+                          pw.SizedBox(width: 10),
+                          pw.Container(width: 55, height: 1, color: gold),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+
+                divider(),
+
+                // ══════════════════════════════════════════════════
+                // RECEIPT NO + DATE
+                // ══════════════════════════════════════════════════
+                pw.Container(
+                  decoration: pw.BoxDecoration(color: cream),
+                  padding: const pw.EdgeInsets.symmetric(
+                      horizontal: 20, vertical: 9),
+                  child: pw.Row(
+                    mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                    children: [
+                      pw.Text('Receipt No: $receiptNo',
+                          style: ts(size: 9.5)),
+                      pw.Text('Date: $dateStr  |  Time: $timeStr',
+                          style: ts(size: 9.5)),
+                    ],
+                  ),
+                ),
+
+                divider(h: 0.8),
+
+                // ══════════════════════════════════════════════════
+                // BILLED TO + HELPER
+                // ══════════════════════════════════════════════════
+                pw.Container(
+                  decoration: pw.BoxDecoration(color: cream),
+                  padding: const pw.EdgeInsets.all(16),
+                  child: pw.Row(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+
+                      // LEFT — Billed To
+                      pw.Expanded(
+                        child: pw.Container(
+                          padding: const pw.EdgeInsets.all(12),
+                          decoration: pw.BoxDecoration(
+                            color:  PdfColors.white,
+                            border: pw.Border.all(color: creamDark),
+                          ),
+                          child: pw.Column(
+                            crossAxisAlignment: pw.CrossAxisAlignment.start,
+                            children: [
+                              pw.Text('Billed To:',
+                                  style: ts(
+                                    font:  bodyBold,
+                                    size:  9,
+                                    color: textGrey,
+                                  )),
+                              pw.SizedBox(height: 5),
+                              pw.Text(userName,
+                                  style: ts(
+                                    font: bodyBold,
+                                    size: 15,
+                                  )),
+                              pw.SizedBox(height: 4),
+                              pw.Text(b.address,
+                                  style: ts(size: 9, color: textGrey)),
+                            ],
+                          ),
+                        ),
+                      ),
+
+                      pw.SizedBox(width: 14),
+
+                      // RIGHT — Helper + Total Paid
+                      pw.Expanded(
+                        child: pw.Column(
+                          crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+                          children: [
+                            // Helper box
+                            pw.Container(
+                              padding: const pw.EdgeInsets.all(12),
+                              decoration: pw.BoxDecoration(
+                                color:  PdfColors.white,
+                                border: pw.Border.all(color: creamDark),
+                              ),
+                              child: pw.Column(
+                                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                                children: [
+                                  pw.Text('Helper:',
+                                      style: ts(
+                                        font:  bodyBold,
+                                        size:  9,
+                                        color: textGrey,
+                                      )),
+                                  pw.SizedBox(height: 5),
+                                  pw.Text(b.helperName,
+                                      style: ts(
+                                        font: bodyBold,
+                                        size: 15,
+                                      )),
+                                ],
+                              ),
+                            ),
+                            pw.SizedBox(height: 8),
+                            // Total Paid — dark green bar + gold chip
+                            pw.Container(
+                              decoration:
+                              pw.BoxDecoration(color: darkGreen),
+                              padding: const pw.EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 11),
+                              child: pw.Row(
+                                mainAxisAlignment:
+                                pw.MainAxisAlignment.spaceBetween,
+                                children: [
+                                  pw.Text('Total Paid',
+                                      style: ts(
+                                          size:  11,
+                                          color: PdfColors.white)),
+                                  pw.Container(
+                                    decoration:
+                                    pw.BoxDecoration(color: gold),
+                                    padding: const pw.EdgeInsets.symmetric(
+                                        horizontal: 10, vertical: 4),
+                                    child: pw.Text(
+                                      'Rs.${total.toStringAsFixed(2)}',
+                                      style: ts(
+                                        font:  bodyBold,
+                                        size:  12,
+                                        color: darkGreen,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                divider(h: 0.8),
+
+                // ══════════════════════════════════════════════════
+                // PAYMENT SUMMARY TABLE
+                // ══════════════════════════════════════════════════
+                pw.Container(
+                  decoration: pw.BoxDecoration(
+                    color:  cream,
+                    border: pw.Border.all(color: creamDark),
+                  ),
+                  margin: const pw.EdgeInsets.all(16),
+                  child: pw.Column(
+                    children: [
+                      // Table title
+                      pw.Container(
+                        decoration: pw.BoxDecoration(color: darkGreen),
+                        width:       double.infinity,
+                        padding:     const pw.EdgeInsets.symmetric(
+                            vertical: 9, horizontal: 14),
+                        child: pw.Center(
+                          child: pw.Text(
+                            'PAYMENT SUMMARY',
+                            style: ts(
+                              font:    bodyBold,
+                              size:    11,
+                              color:   PdfColors.white,
+                              spacing: 2,
+                            ),
+                          ),
+                        ),
+                      ),
+                      // Column headers
+                      pw.Container(
+                        decoration: pw.BoxDecoration(color: midGreen),
+                        padding: const pw.EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 7),
+                        child: pw.Row(
+                          mainAxisAlignment:
+                          pw.MainAxisAlignment.spaceBetween,
+                          children: [
+                            pw.Text('DESCRIPTION',
+                                style: ts(
+                                  font:    bodyBold,
+                                  size:    9,
+                                  color:   goldLight,
+                                  spacing: 1,
+                                )),
+                            pw.Text('AMOUNT',
+                                style: ts(
+                                  font:    bodyBold,
+                                  size:    9,
+                                  color:   goldLight,
+                                  spacing: 1,
+                                )),
+                          ],
+                        ),
+                      ),
+                      // Service row
+                      pw.Container(
+                        decoration: pw.BoxDecoration(color: PdfColors.white),
+                        padding: const pw.EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 10),
+                        child: pw.Row(
+                          mainAxisAlignment:
+                          pw.MainAxisAlignment.spaceBetween,
+                          children: [
+                            pw.Text('Service Price (${b.serviceName})',
+                                style: ts(font: bodyBold, size: 11)),
+                            pw.Text(
+                                'Rs.${b.baseAmount.toStringAsFixed(2)}',
+                                style: ts(size: 11)),
+                          ],
+                        ),
+                      ),
+                      // Platform fee row
+                      pw.Container(
+                        decoration: pw.BoxDecoration(color: cream),
+                        padding: const pw.EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 10),
+                        child: pw.Row(
+                          mainAxisAlignment:
+                          pw.MainAxisAlignment.spaceBetween,
+                          children: [
+                            pw.Text('Platform Charges (5%)',
+                                style: ts(size: 11)),
+                            pw.Text(
+                                'Rs.${b.platformFee.toStringAsFixed(2)}',
+                                style: ts(size: 11)),
+                          ],
+                        ),
+                      ),
+                      // Total row
+                      pw.Container(
+                        decoration: pw.BoxDecoration(color: darkGreen),
+                        padding: const pw.EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 11),
+                        child: pw.Row(
+                          mainAxisAlignment:
+                          pw.MainAxisAlignment.spaceBetween,
+                          children: [
+                            pw.Text('Total Paid',
+                                style: ts(
+                                  font:  bodyBold,
+                                  size:  13,
+                                  color: PdfColors.white,
+                                )),
+                            pw.Container(
+                              decoration: pw.BoxDecoration(color: gold),
+                              padding: const pw.EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 4),
+                              child: pw.Text(
+                                'Rs.${total.toStringAsFixed(2)}',
+                                style: ts(
+                                  font:  bodyBold,
+                                  size:  13,
+                                  color: darkGreen,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                // ══════════════════════════════════════════════════
+                // PAYMENT METHOD
+                // ══════════════════════════════════════════════════
+                pw.Container(
+                  margin: const pw.EdgeInsets.fromLTRB(16, 0, 16, 14),
+                  decoration: pw.BoxDecoration(
+                    color:  PdfColors.white,
+                    border: pw.Border.all(color: creamDark),
+                  ),
+                  padding: const pw.EdgeInsets.all(12),
+                  child: pw.Row(
+                    mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                    children: [
+                      pw.Column(
+                        crossAxisAlignment: pw.CrossAxisAlignment.start,
+                        children: [
+                          pw.Text('Payment Method:',
+                              style: ts(font: bodyBold, size: 10)),
+                          pw.SizedBox(height: 3),
+                          pw.Text(payMode,
+                              style: ts(font: bodyBold, size: 12)),
+                        ],
+                      ),
+                      pw.Text(
+                        'Total Paid: Rs.${total.toStringAsFixed(2)}',
+                        style: ts(font: bodyBold, size: 11),
+                      ),
+                    ],
+                  ),
+                ),
+
+                // ══════════════════════════════════════════════════
+                // THANK YOU + CONTACT
+                // ══════════════════════════════════════════════════
+                pw.Container(
+                  margin: const pw.EdgeInsets.fromLTRB(16, 0, 16, 14),
+                  decoration: pw.BoxDecoration(
+                    color:  PdfColors.white,
+                    border: pw.Border.all(color: creamDark),
+                  ),
+                  padding: const pw.EdgeInsets.all(14),
+                  child: pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text(
+                        'Thank you for using our service. Please do not hesitate to contact us for further assistance!',
+                        style: ts(size: 9.5),
+                      ),
+                      pw.SizedBox(height: 10),
+                      pw.Row(
+                        children: [
+                          pw.Text('Phone: +91 9876543210',
+                              style: ts(size: 9)),
+                          pw.SizedBox(width: 30),
+                          pw.Text('Email: contact@troublesarthi.com',
+                              style: ts(size: 9)),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+
+                pw.Spacer(),
+
+                divider(),
+
+                // ══════════════════════════════════════════════════
+                // FOOTER
+                // ══════════════════════════════════════════════════
+                pw.Container(
+                  decoration: pw.BoxDecoration(color: darkGreen),
+                  padding: const pw.EdgeInsets.symmetric(vertical: 10),
+                  child: pw.Center(
+                    child: pw.Text(
+                      'This is an electronic receipt and does not require a physical signature.',
+                      style: ts(size: 8, color: PdfColors.white),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  return pdf;
 }

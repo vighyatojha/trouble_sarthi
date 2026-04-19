@@ -9,10 +9,12 @@ environment:
 
 dependencies:
     flutter:
+
         sdk: flutter
 
     # ── UI & Fonts ───────────────────────────────────────────────────────────
     font_awesome_flutter: ^10.7.0
+
     path_provider: ^2.1.2
     local_auth: ^3.0.0
     google_fonts: ^6.1.0
@@ -44,7 +46,11 @@ dependencies:
     # ── NEW: Add these two lines ─────────────────────────────────────────────
     connectivity_plus: ^6.1.4
     firebase_database: ^11.3.10
-    cached_network_image: ^3.4.1       # ← ADD: profile photo caching
+    cached_network_image: ^3.4.1
+
+    pdf: ^3.11.0
+    printing: ^5.13.0
+    intl: ^0.19.0
 
 dev_dependencies:
     flutter_test:
@@ -57,6 +63,7 @@ flutter:
     assets:
         - assets/images/
         - assets/fonts/SAMAN___.TTF
+
 
     fonts:
         - family: Saman

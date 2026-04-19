@@ -133,6 +133,34 @@ class RealtimeDbService {
     }
   }
 
+  Future<void> sendUserPaymentConfirmedMessage({
+    required String chatId,
+    required String paymentMethod,
+  }) async {
+    try {
+      final msgRef = _db.ref('chats/$chatId/messages').push();
+      await msgRef.set({
+        'messageId':    msgRef.key,
+        'text':         paymentMethod == 'upi'
+            ? '💳 Customer confirmed UPI (online) payment. Have you received it?'
+            : '💳 Customer confirmed cash payment. Have you received it?',
+        'senderId':     'system',
+        'senderName':   'Trouble Sarthi',
+        'senderRole':   'system',
+        'type':         'payment_confirmation_pending',
+        'paymentMethod': paymentMethod,
+        'timestamp':    ServerValue.timestamp,
+        'read':         false,
+      });
+      await _db.ref('chatMeta/$chatId').update({
+        'lastMessage':     'Payment confirmed by customer',
+        'lastMessageTime': ServerValue.timestamp,
+      });
+    } catch (e) {
+      debugPrint('RealtimeDbService.sendUserPaymentConfirmedMessage error: $e');
+    }
+  }
+
   // ── Real-time messages stream ─────────────────────────────────────────────
   Stream<List<Map<String, dynamic>>> messagesStream(String chatId) {
     return _db

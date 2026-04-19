@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:http/http.dart' as http;
+import 'package:trouble_sarthi/service/trouble_sarthi_pdf_service.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:trouble_sarthi/screens/about_screen.dart';
 import 'package:trouble_sarthi/service/firebase_storage_service.dart';
@@ -2247,61 +2248,44 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
   }
 
   // ── Download my data ──────────────────────────────────────────────────────
+  // ── Download my data (generates PDF on-device, no admin request) ──────────
   Future<void> _downloadData() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
 
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Row(children: [
-          SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(
-                  color: Colors.white, strokeWidth: 2)),
-          SizedBox(width: 12),
-          Text('Sending request...'),
-        ]),
-        backgroundColor: Color(0xFF7C3AED),
-        duration: Duration(seconds: 2),
-      ));
-    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      useRootNavigator: true,
+      builder: (dialogCtx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Download My Data',
+            style: TextStyle(fontWeight: FontWeight.bold)),
+        content: const Text(
+            'This will generate a multi-page PDF with your complete account, '
+                'booking, payment and helper history.\n\n'
+                'The file will open in your device\'s share sheet so you can '
+                'save, print or share it.',
+            style: TextStyle(height: 1.5)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogCtx).pop(false),
+            child: const Text('Cancel',
+                style: TextStyle(color: Color(0xFF6B7280))),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogCtx).pop(true),
+            child: const Text('Generate PDF',
+                style: TextStyle(
+                    color: Color(0xFF7C3AED),
+                    fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
 
-    try {
-      final userDoc = await FirebaseFirestore.instance
-          .collection('users').doc(user.uid).get();
-      final username     = userDoc.data()?['username']    as String? ?? 'Unknown';
-      final displayName  = userDoc.data()?['name']        as String? ?? user.displayName ?? 'Unknown';
-      final email        = user.email ?? '';
+    if (confirmed != true || !mounted) return;
 
-      await FirebaseFirestore.instance.collection('admin_requests').add({
-        'type':        'data_export',
-        'uid':         user.uid,
-        'email':       email,
-        'username':    username,
-        'displayName': displayName,
-        'requestedAt': FieldValue.serverTimestamp(),
-        'status':      'pending',
-        'message':     'User @$username ($email) has requested a copy of their data.',
-        'read':        false,
-      });
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content:
-          Text("Request sent! You'll be contacted via email within 24 hours."),
-          backgroundColor: Color(0xFF059669),
-          duration: Duration(seconds: 4),
-        ));
-      }
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Failed to send request. Please try again.'),
-          backgroundColor: Color(0xFFDC2626),
-        ));
-      }
-    }
+    await TroubleSarthiPdfService.downloadUserData(context);
   }
 
   // ── Delete account ────────────────────────────────────────────────────────
@@ -2641,7 +2625,7 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                     iconColor: const Color(0xFF059669),
                     iconBg: const Color(0xFFD1FAE5),
                     title: 'Download My Data',
-                    subtitle: 'Request a copy — admin will email you',
+                    subtitle: 'Export your data as a PDF instantly',
                     onTap: _downloadData,
                   ),
                   _SettingsTapTile(
