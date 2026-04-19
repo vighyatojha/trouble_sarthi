@@ -2525,19 +2525,12 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                     title: 'SOS Shortcut',
                     subtitle: 'Press power 3× to trigger SOS',
                     value: _sosShortcut,
+                    isLast: true,
                     onChanged: (_) => _toggle(
                         'emergencySettings', 'sosShortcut',
                         _sosShortcut, (v) => _sosShortcut = v),
                   ),
-                  _SettingsTapTile(
-                    icon: Icons.pin_rounded,
-                    iconColor: const Color(0xFF7C3AED),
-                    iconBg: const Color(0xFFEDE9FE),
-                    title: 'Safety PIN',
-                    subtitle: 'Set or change your safety PIN',
-                    isLast: true,
-                    onTap: _setSafetyPin,
-                  ),
+
                 ]),
 
                 const SizedBox(height: 24),
@@ -2697,13 +2690,6 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                     label: 'Request Account Deletion',
                     onTap: _deleteAccount),
 
-                const SizedBox(height: 12),
-
-                // ── LOG OUT ────────────────────────────────────────
-                _redButton(
-                    icon: Icons.logout_rounded,
-                    label: 'Log Out',
-                    onTap: _logOut),
 
                 const SizedBox(height: 20),
                 const Center(

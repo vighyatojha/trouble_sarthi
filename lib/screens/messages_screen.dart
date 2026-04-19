@@ -392,7 +392,17 @@ class _MessagesTabState extends State<_MessagesTab> {
           );
         }
 
-        final docs = snap.data?.docs ?? [];
+        final allDocs = snap.data?.docs ?? [];
+
+        // ✅ Only show chats where a helper has been assigned (post-acceptance)
+        final docs = allDocs.where((doc) {
+          final d       = doc.data() as Map<String, dynamic>;
+          final status  = (d['bookingStatus'] as String?) ?? '';
+          final helperId = (d['helperId'] as String?) ?? '';
+          return helperId.isNotEmpty &&
+              status != 'pending' &&
+              status.isNotEmpty;
+        }).toList();
 
         // Sort raw docs first
         final sorted = [...docs]..sort((a, b) {
@@ -489,31 +499,26 @@ class _MessagesTabState extends State<_MessagesTab> {
                       onTap: () {
                         if (_isSelecting) {
                           _toggleSelect(mc.chatId);
-                        } else {
-                          final data          = mc.data;
-                          final bookingStatus =
-                              data['bookingStatus'] as String? ?? 'active';
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => ChatScreen(
-                                // ✅ Always use the active chatId
-                                chatId:       mc.chatId,
-                                helperName:
-                                data['otherName'] as String? ?? 'Helper',
-                                helperId:
-                                data['helperId'] as String? ?? '',
-                                helperPhoto:
-                                data['helperPhoto'] as String?,
-                                bookingId:
-                                data['bookingId'] as String?,
-                                serviceName:
-                                data['serviceName'] as String?,
-                                bookingStatus: bookingStatus,
-                              ),
-                            ),
-                          );
+                          return;
                         }
+                        final data          = mc.data;
+                        final bookingStatus = data['bookingStatus'] as String? ?? 'active';
+                        // Block navigation for completed / cancelled
+                        if (bookingStatus == 'completed' || bookingStatus == 'cancelled') return;
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => ChatScreen(
+                              chatId:        mc.chatId,
+                              helperName:    data['otherName']   as String? ?? 'Helper',
+                              helperId:      data['helperId']    as String? ?? '',
+                              helperPhoto:   data['helperPhoto'] as String?,
+                              bookingId:     data['bookingId']   as String?,
+                              serviceName:   data['serviceName'] as String?,
+                              bookingStatus: bookingStatus,
+                            ),
+                          ),
+                        );
                       },
                       onLongPress: () => _toggleSelect(mc.chatId),
                     ),
