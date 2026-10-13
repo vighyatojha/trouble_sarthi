@@ -1,8 +1,7 @@
 // ignore_for_file: use_build_context_synchronously
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import '../service/realtime_db_service.dart';
-import '../screens/chat_screen.dart';
+import '../core/booking_chat_scree.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -318,12 +317,15 @@ class _MessagesTabState extends State<_MessagesTab> {
       }
     }
 
-    final batch = FirebaseFirestore.instance.batch();
-    for (final id in allIdsToDelete) {
-      batch.delete(FirebaseFirestore.instance.collection('chats').doc(id));
-    }
-    await batch.commit();
+    // Chats belong to both people on a booking, so they can't be deleted from
+    // one phone (security rules forbid it). They close automatically after the job.
     _clearSelection();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Chats close automatically 7 days after the job is completed.'),
+        behavior: SnackBarBehavior.floating,
+      ));
+    }
   }
 
   // ── Deduplicate raw Firestore docs into merged chats ──────────────────────
@@ -508,14 +510,14 @@ class _MessagesTabState extends State<_MessagesTab> {
                         Navigator.push(
                           context,
                           MaterialPageRoute(
-                            builder: (_) => ChatScreen(
-                              chatId:        mc.chatId,
-                              helperName:    data['otherName']   as String? ?? 'Helper',
-                              helperId:      data['helperId']    as String? ?? '',
-                              helperPhoto:   data['helperPhoto'] as String?,
-                              bookingId:     data['bookingId']   as String?,
-                              serviceName:   data['serviceName'] as String?,
-                              bookingStatus: bookingStatus,
+                            builder: (_) => BookingChatScreen(
+                              bookingId: mc.chatId,
+                              otherName: data['helperName'] as String? ??
+                                  data['otherName'] as String? ?? 'Helper',
+                              myName: FirebaseAuth.instance.currentUser?.displayName ??
+                                  data['customerName'] as String? ?? 'Customer',
+                              myRole: 'customer',
+                              subtitle: data['serviceName'] as String? ?? '',
                             ),
                           ),
                         );

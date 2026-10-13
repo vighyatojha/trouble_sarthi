@@ -6,18 +6,22 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:trouble_sarthi/screens/messages_screen.dart'
-    show NotificationCountNotifier, MessagesScreen;
+    show NotificationCountNotifier;
 import 'package:trouble_sarthi/screens/profile_screen.dart';
 import 'auth/login_screen.dart';
 import 'messages_screen.dart' show NotificationCountNotifier, ServicesScreen;
 import 'about_screen.dart';
-import 'booking_screen.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'location_picker_screen.dart';
-import 'helper_list_screen.dart';
 import 'midnight_emergency_screen.dart';
 import 'home_skeleton.dart'; // ← your skeleton file
 import '../service/notification_service.dart';
-import '../screens/booking_screen.dart';
+import '../core/push_tokens.dart';
+import '../core/service_catalog.dart';
+import '../request/describe_problem_screen.dart';
+import '../request/my_requests_screen.dart';
+import '../request/booking_tracker_screen.dart';
+import '../request/request_pitches_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // COLOR HELPERS
@@ -259,7 +263,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final List<Widget> _screens = [
     const HomeContent(),
     const ServicesScreen(),
-    const BookingsScreen(),
+    const MyRequestsScreen(),
     const AboutScreen(),
     const ProfileScreen(),
   ];
@@ -267,22 +271,27 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    // Listen for notification taps → auto-navigate to booking detail
+    // Save this phone's push token for the signed-in customer.
+    PushTokens.instance.start(app: 'user');
+    // Listen for notification taps → open the right booking / request.
     NotificationNavNotifier.instance.addListener(_onNotificationNav);
+    // A tap that launched the app arrives before this screen exists.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _onNotificationNav());
   }
 
-  // Called whenever a notification banner is tapped (foreground or background)
+  // Called whenever a notification is tapped. Value is "booking:<id>" or "job:<id>".
   void _onNotificationNav() {
-    final bookingId = NotificationNavNotifier.instance.value;
-    if (bookingId == null || !mounted) return;
+    final target = NotificationNavNotifier.instance.value;
+    if (target == null || !mounted) return;
     NotificationNavNotifier.instance.value = null; // reset so it doesn't re-fire
 
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => BookingsScreen(openBookingId: bookingId),
-      ),
-    );
+    final Widget? page = target.startsWith('booking:')
+        ? BookingTrackerScreen(bookingId: target.substring(8))
+        : target.startsWith('job:')
+        ? RequestPitchesScreen(jobId: target.substring(4))
+        : null;
+    if (page == null) return;
+    Navigator.push(context, MaterialPageRoute(builder: (_) => page));
   }
 
   @override
@@ -1192,6 +1201,7 @@ class _ProfileAvatar extends StatelessWidget {
                         color: Color(0xFFDC2626))),
                 onTap: () async {
                   Navigator.pop(context);
+                  await PushTokens.instance.stop();
                   await FirebaseAuth.instance.signOut();
                   if (context.mounted) {
                     Navigator.pushAndRemoveUntil(
@@ -2925,6 +2935,78 @@ class _SubServiceItem extends StatefulWidget {
 class _SubServiceItemState extends State<_SubServiceItem> {
   bool _pressed = false;
 
+  /// New flow: describe the problem → nearby helpers send prices.
+  void _openRequestFlow(BuildContext context) {
+    final sub = ServiceCatalog.lookup(widget.sub.name);
+    final cat = sub == null ? null : ServiceCatalog.categoryOf(sub.id);
+    if (sub == null || cat == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('This service is coming soon.'),
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
+    if (!cat.biddable) {
+      _showEmergencyNumbers(context);
+      return;
+    }
+    Navigator.push(
+      context,
+      PageRouteBuilder(
+        pageBuilder: (_, __, ___) => DescribeProblemScreen(subcategory: sub, color: widget.color),
+        transitionsBuilder: (_, animation, __, child) {
+          final curved = CurvedAnimation(parent: animation, curve: Curves.easeOutCubic);
+          return FadeTransition(
+            opacity: Tween<double>(begin: 0.0, end: 1.0).animate(curved),
+            child: SlideTransition(
+              position: Tween<Offset>(begin: const Offset(0.04, 0), end: Offset.zero).animate(curved),
+              child: child,
+            ),
+          );
+        },
+        transitionDuration: const Duration(milliseconds: 260),
+      ),
+    );
+  }
+
+  /// Emergencies don't wait for price quotes: call the official numbers.
+  void _showEmergencyNumbers(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('Emergency help',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: Color(0xFFDC2626))),
+            const SizedBox(height: 4),
+            const Text('For emergencies, call these numbers directly. They are free and work 24×7.',
+                style: TextStyle(color: Color(0xFF6B7280))),
+            const SizedBox(height: 12),
+            for (final n in const [
+              ('112', 'All emergencies (police, fire, ambulance)'),
+              ('108', 'Ambulance'),
+              ('101', 'Fire brigade'),
+              ('1078', 'Disaster management (NDMA)'),
+            ])
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const CircleAvatar(
+                  backgroundColor: Color(0xFFFEE2E2),
+                  child: Icon(Icons.call, color: Color(0xFFDC2626)),
+                ),
+                title: Text(n.$1, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18)),
+                subtitle: Text(n.$2),
+                onTap: () => launchUrl(Uri(scheme: 'tel', path: n.$1)),
+              ),
+          ]),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
@@ -2959,37 +3041,7 @@ class _SubServiceItemState extends State<_SubServiceItem> {
           return;
         }
         Navigator.pop(context);
-        Navigator.push(
-          context,
-          PageRouteBuilder(
-            pageBuilder: (_, __, ___) => HelperListScreen(
-              serviceName: widget.sub.name,
-              categoryName: widget.categoryTitle,
-              subServices: widget.allSubs
-                  .map((s) => SubServiceItem(s.name, s.icon))
-                  .toList(),
-              serviceColor: widget.color,
-              serviceBgColor: widget.bgColor,
-              categoryEmoji: '',
-            ),
-            transitionsBuilder: (_, animation, __, child) {
-              final curved = CurvedAnimation(
-                  parent: animation, curve: Curves.easeOutCubic);
-              return FadeTransition(
-                opacity: Tween<double>(begin: 0.0, end: 1.0)
-                    .animate(curved),
-                child: SlideTransition(
-                  position: Tween<Offset>(
-                      begin: const Offset(0.04, 0),
-                      end: Offset.zero)
-                      .animate(curved),
-                  child: child,
-                ),
-              );
-            },
-            transitionDuration: const Duration(milliseconds: 260),
-          ),
-        );
+        _openRequestFlow(context);
       },
       onTapCancel: () => setState(() => _pressed = false),
       child: AnimatedContainer(

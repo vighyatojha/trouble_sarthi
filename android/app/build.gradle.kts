@@ -25,7 +25,7 @@ android {
     defaultConfig {
         applicationId = "com.example.trouble_sarthi"
         minSdk = flutter.minSdkVersion
-        targetSdk = 37   // ✅ Updated
+        targetSdk = 36   // must not be higher than compileSdk
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         multiDexEnabled = true

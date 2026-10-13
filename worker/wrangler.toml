@@ -1,0 +1,13 @@
+# Cloudflare Worker that sends push notifications for Trouble Sarthi + Sarthi Kendra.
+# Free plan is enough (100,000 requests/day).
+name = "sarthi-notify"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[vars]
+FIREBASE_PROJECT_ID = "trouble-sarthi"
+
+# Secret (never commit it). Set once with:
+#   npx wrangler secret put SERVICE_ACCOUNT_JSON
+# and paste the whole service-account JSON from
+# Firebase console → Project settings → Service accounts → Generate new private key.

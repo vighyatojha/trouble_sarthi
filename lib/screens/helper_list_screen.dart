@@ -666,9 +666,19 @@ class _HelperListScreenState extends State<HelperListScreen>
 
   Stream<List<HelperModel>> _helpersStream(String sidebarName) {
     final normalized = sidebarName.trim().toLowerCase();
+    if (normalized.isEmpty) return Stream.value([]);
 
-    // Fetch ALL helpers with no filter — match everything in-memory
-    // This avoids any Firestore field name / value mismatch
+    // Alias map handles singular↔plural variants only
+    // (e.g. admin stored "Plumber", sidebar shows "Plumbing" → still match)
+    const aliasMap = <String, String>{
+      'plumbing': 'plumber',   'plumber': 'plumbing',
+      'electrical': 'electrician', 'electrician': 'electrical',
+      'carpentry': 'carpenter', 'carpenter': 'carpentry',
+      'painting': 'painter',   'painter': 'painting',
+      'cleaning': 'cleaner',   'cleaner': 'cleaning',
+    };
+    final alias = aliasMap[normalized] ?? '';
+
     return FirebaseFirestore.instance
         .collection('helpers')
         .snapshots()
@@ -676,38 +686,50 @@ class _HelperListScreenState extends State<HelperListScreen>
       final matched = snap.docs.where((doc) {
         final d = doc.data();
 
-        // ── KYC check: accept any approved variation
+        // ── KYC check ────────────────────────────────────────────────────────
         final kyc = (d['kycStatus'] as String? ?? '').toLowerCase();
         final isKycOk = kyc == 'approved' ||
             kyc == 'verified' ||
             kyc == 'active' ||
             (d['isApproved'] == true) ||
             (d['kycApproved'] == true);
-
         if (!isKycOk) return false;
 
-        // ── Service match: case-insensitive across all service fields
+        // Safe normaliser
+        String n(dynamic v) => (v as String? ?? '').trim().toLowerCase();
+
+        // Returns true if the value matches the searched category OR its alias
+        bool hit(String s) =>
+            s.isNotEmpty &&
+                (s == normalized || (alias.isNotEmpty && s == alias));
+
+        // 1. services[] — edit_profile_screen saves selected subcategory names
         final services = List<String>.from(d['services'] ?? []);
-        final serviceMatch = services.any(
-              (s) => s.trim().toLowerCase() == normalized,
-        );
+        if (services.any((s) => hit(n(s)))) return true;
 
-        final serviceType =
-        (d['serviceType'] as String? ?? '').trim().toLowerCase();
-        final typeMatch = serviceType == normalized;
+        // 2. skills[]  — edit_profile_screen also writes skills = services list
+        final skills = List<String>.from(d['skills'] ?? []);
+        if (skills.any((s) => hit(n(s)))) return true;
 
-        final subcategory =
-        (d['subcategory'] as String? ?? '').trim().toLowerCase();
-        final subMatch = subcategory == normalized;
+        // 3. serviceType singular field
+        if (hit(n(d['serviceType']))) return true;
 
-        // ── Partial match fallback: e.g. "plumber" matches "plumbing"
-        final partialMatch = services.any((s) =>
-        s.trim().toLowerCase().contains(normalized) ||
-            normalized.contains(s.trim().toLowerCase())) ||
-            serviceType.contains(normalized) ||
-            normalized.contains(serviceType);
+        // 4. subcategory singular field
+        if (hit(n(d['subcategory']))) return true;
 
-        return serviceMatch || typeMatch || subMatch || partialMatch;
+        // 5. category top-level field — admin panel primary field
+        if (hit(n(d['category']))) return true;
+
+        // 6. categories[] multi-select array [{category, subcategory}]
+        //    Saved by admin panel's "Add Category" row system
+        final categoriesList = List<dynamic>.from(d['categories'] ?? []);
+        for (final c in categoriesList) {
+          if (c is Map) {
+            if (hit(n(c['subcategory'])) || hit(n(c['category']))) return true;
+          }
+        }
+
+        return false;          // ← no broad partial match — this was the bug
       }).toList();
 
       // Debug — remove after confirming helpers show

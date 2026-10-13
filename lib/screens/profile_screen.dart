@@ -3,9 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
 import 'package:path_provider/path_provider.dart';
-import 'dart:typed_data'; // ← ADD THIS (required for Uint8List)
 import 'dart:math' as math;
-import 'package:firebase_storage/firebase_storage.dart';
+import '../core/cloudinary.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -17,6 +16,9 @@ import 'package:trouble_sarthi/screens/about_screen.dart';
 import 'package:trouble_sarthi/service/firebase_storage_service.dart';
 import 'package:trouble_sarthi/service/image_picker_service.dart';
 import 'ai_agent_constants.dart';
+import 'auth/login_screen.dart';
+import '../request/my_requests_screen.dart';
+import '../core/push_tokens.dart';
 import 'package:local_auth/local_auth.dart';
 
 
@@ -568,7 +570,7 @@ class _GItem extends StatelessWidget {
 //  3. Uses storageRef.getDownloadURL() not snapshot.ref.getDownloadURL()
 //     — avoids stale-ref bug on some Firebase SDK versions
 //  4. try/finally ALWAYS clears _uploadTask — loader never freezes
-//  5. _contentTypeFromBytes() detects format from magic bytes, not file path
+//  5. Photos upload to Cloudinary (lib/core/cloudinary.dart)
 //     — content:// URIs from Android picker have no extension
 //  6. Temp file written to Directory.systemTemp then deleted in finally
 // ═══════════════════════════════════════════════════════════════════════════
@@ -584,7 +586,7 @@ class _GItem extends StatelessWidget {
 //  3. Uses storageRef.getDownloadURL() not snapshot.ref.getDownloadURL()
 //     — avoids stale-ref bug on some Firebase SDK versions
 //  4. try/finally ALWAYS clears _uploadTask — loader never freezes
-//  5. _contentTypeFromBytes() detects format from magic bytes, not file path
+//  5. Photos upload to Cloudinary (lib/core/cloudinary.dart)
 //     — content:// URIs from Android picker have no extension
 //  6. Temp file written to Directory.systemTemp then deleted in finally
 // ═══════════════════════════════════════════════════════════════════════════
@@ -611,7 +613,7 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
 
   File?       _pickedImage;
   String      _existingPhotoUrl = '';
-  UploadTask? _uploadTask;
+  bool        _uploading = false;
 
   String? _nameErr, _phoneErr, _emergencyErr;
 
@@ -668,33 +670,9 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
     if (file != null && mounted) {
       setState(() {
         _pickedImage = file;
-        _uploadTask  = null;
+        _uploading   = false;
       });
     }
-  }
-
-  // ── detect content type from magic bytes ──────────────────────────────────
-  String _contentTypeFromBytes(Uint8List bytes) {
-    if (bytes.length >= 2 &&
-        bytes[0] == 0xFF && bytes[1] == 0xD8) {
-      return 'image/jpeg';
-    }
-    if (bytes.length >= 4 &&
-        bytes[0] == 0x89 && bytes[1] == 0x50 &&
-        bytes[2] == 0x4E && bytes[3] == 0x47) {
-      return 'image/png';
-    }
-    if (bytes.length >= 4 &&
-        bytes[0] == 0x47 && bytes[1] == 0x49 &&
-        bytes[2] == 0x46 && bytes[3] == 0x38) {
-      return 'image/gif';
-    }
-    if (bytes.length >= 4 &&
-        bytes[0] == 0x52 && bytes[1] == 0x49 &&
-        bytes[2] == 0x46 && bytes[3] == 0x46) {
-      return 'image/webp';
-    }
-    return 'image/jpeg';
   }
 
   // ── upload photo ──────────────────────────────────────────────────────────
@@ -717,57 +695,15 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
     final uid = widget.user?.uid ?? '';
     if (uid.isEmpty) return null;
 
-    // Read raw bytes — works for both file:// and content:// URIs
-    final Uint8List bytes;
+    // Firebase Storage needs the paid plan, so profile photos go to Cloudinary.
+    if (mounted) setState(() { _uploading = true; });
     try {
-      bytes = await _pickedImage!.readAsBytes();
-    } catch (e) {
-      throw Exception('Could not read image file: $e');
+      return await Cloudinary.upload(_pickedImage!, folder: 'profiles/$uid');
+    } on CloudinaryException catch (e) {
+      throw Exception(e.message);
+    } finally {
+      if (mounted) setState(() { _uploading = false; });
     }
-    if (bytes.isEmpty) throw Exception('Image file is empty.');
-
-    // Detect format and build storage reference
-    final contentType = _contentTypeFromBytes(bytes);
-    String ext = 'jpg';
-    if (contentType == 'image/png') ext = 'png';
-    if (contentType == 'image/webp') ext = 'webp';
-    if (contentType == 'image/gif') ext = 'gif';
-
-    final storageRef = FirebaseStorage.instance
-        .ref()
-        .child('profile_photos')
-        .child('$uid.$ext');
-
-    final metadata = SettableMetadata(contentType: contentType);
-    final task = storageRef.putData(bytes, metadata);
-
-    // ✅ FIXED: curly braces — NOT arrow syntax
-    // Arrow: setState(() => _uploadTask = task)  ← throws because UploadTask is a Future
-    // Fixed: setState(() { _uploadTask = task; }) ← always returns void
-    if (mounted) setState(() {
-      _uploadTask = task;
-    });
-
-    final snapshot = await task.timeout(
-      const Duration(seconds: 60),
-      onTimeout: () {
-        task.cancel();
-        throw TimeoutException('Upload timed out. Check your connection.');
-      },
-    );
-
-    if (snapshot.state != TaskState.success) {
-      throw Exception('Upload ended in state: ${snapshot.state}');
-    }
-
-    // Wait for Firebase Storage to finish processing before fetching URL.
-    // firebase_storage 12.x has a race condition where putData() reports
-    // success before the object is accessible via getDownloadURL().
-    await Future.delayed(const Duration(seconds: 2));
-
-    // Use snapshot.ref — NOT storageRef — to get the URL.
-    // snapshot.ref points to the exact location of the uploaded object.
-    return await snapshot.ref.getDownloadURL();
   }
 
 
@@ -810,7 +746,7 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
           setState(() { _saving = false; });
           String msg = 'Photo upload failed: ${e.message ?? e.code}';
           if (e.code == 'unauthorized' || e.code == 'permission-denied') {
-            msg = 'Storage permission denied. Check Firebase Storage Rules.';
+            msg = 'Permission denied. Please sign in again.';
           }
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text(msg),
@@ -1003,45 +939,24 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
                   ),
 
                   // upload overlay
-                  if (_uploadTask != null)
+                  if (_uploading)
                     Positioned.fill(
-                      child: StreamBuilder<TaskSnapshot>(
-                        stream: _uploadTask!.snapshotEvents,
-                        builder: (_, snap) {
-                          final total    = snap.data?.totalBytes ?? 0;
-                          final progress = total > 0
-                              ? snap.data!.bytesTransferred / total
-                              : 0.0;
-                          return Container(
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: Colors.black.withOpacity(0.55),
-                            ),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                SizedBox(
-                                  width: 36, height: 36,
-                                  child: CircularProgressIndicator(
-                                    value: total > 0 ? progress : null,
-                                    color: Colors.white, strokeWidth: 3,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  total > 0 ? '${(progress * 100).toInt()}%' : '...',
-                                  style: const TextStyle(fontSize: 10,
-                                      color: Colors.white, fontWeight: FontWeight.bold),
-                                ),
-                              ],
-                            ),
-                          );
-                        },
+                      child: Container(
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: Colors.black.withOpacity(0.55),
+                        ),
+                        child: const Center(
+                          child: SizedBox(
+                            width: 36, height: 36,
+                            child: CircularProgressIndicator(color: Colors.white, strokeWidth: 3),
+                          ),
+                        ),
                       ),
                     ),
 
                   // camera badge
-                  if (_uploadTask == null)
+                  if (!_uploading)
                     Positioned(
                       bottom: 2, right: 2,
                       child: Container(
@@ -1065,36 +980,18 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
                 style: TextStyle(fontSize: 11, color: Color(0xFF9CA3AF)))),
 
             // progress bar
-            if (_uploadTask != null) ...[
+            if (_uploading) ...[
               const SizedBox(height: 10),
-              StreamBuilder<TaskSnapshot>(
-                stream: _uploadTask!.snapshotEvents,
-                builder: (_, snap) {
-                  final total    = snap.data?.totalBytes ?? 0;
-                  final progress = total > 0
-                      ? snap.data!.bytesTransferred / total
-                      : 0.0;
-                  return Column(children: [
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(6),
-                      child: LinearProgressIndicator(
-                        value: total > 0 ? progress : null,
-                        minHeight: 6,
-                        backgroundColor: const Color(0xFFEDE9FE),
-                        valueColor: const AlwaysStoppedAnimation<Color>(
-                            Color(0xFF7C3AED)),
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      total > 0
-                          ? 'Uploading… ${(progress * 100).toInt()}%'
-                          : 'Connecting to storage…',
-                      style: const TextStyle(fontSize: 11, color: Color(0xFF7C3AED)),
-                    ),
-                  ]);
-                },
+              ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: const LinearProgressIndicator(
+                  minHeight: 6,
+                  backgroundColor: Color(0xFFEDE9FE),
+                  valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF7C3AED)),
+                ),
               ),
+              const SizedBox(height: 4),
+              const Text('Uploading photo…', style: TextStyle(fontSize: 11, color: Color(0xFF7C3AED))),
             ],
 
             const SizedBox(height: 18),
@@ -1201,7 +1098,7 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
             SizedBox(
               width: double.infinity, height: 52,
               child: ElevatedButton(
-                onPressed: (_saving || _saved || _uploadTask != null) ? null : _save,
+                onPressed: (_saving || _saved || _uploading) ? null : _save,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF7C3AED),
                   disabledBackgroundColor: _saved
@@ -1975,9 +1872,11 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
     );
     if (ok == true && mounted) {
       try {
+        await PushTokens.instance.stop();
         await FirebaseAuth.instance.signOut();
         if (mounted) {
-          Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
+          Navigator.of(context).pushAndRemoveUntil(
+              MaterialPageRoute(builder: (_) => const LoginScreen()), (_) => false);
         }
       } catch (e) {
         if (mounted) {
@@ -2124,9 +2023,11 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
           }
         }, SetOptions(merge: true));
 
+        await PushTokens.instance.stop();
         await FirebaseAuth.instance.signOut();
         if (mounted) {
-          Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
+          Navigator.of(context).pushAndRemoveUntil(
+              MaterialPageRoute(builder: (_) => const LoginScreen()), (_) => false);
         }
       }
     } on FirebaseAuthException catch (e) {
@@ -2232,8 +2133,7 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
   void _goToActivityPastServices() {
     // Pops back to profile, which should handle tab switching
     // Change '/activity' to your actual route if different
-    Navigator.pushNamed(context, '/activity',
-        arguments: {'tab': 'pastServices'});
+    Navigator.push(context, MaterialPageRoute(builder: (_) => const MyRequestsScreen()));
   }
 
   // ── Safety PIN sheet ──────────────────────────────────────────────────────

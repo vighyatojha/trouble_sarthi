@@ -9,13 +9,9 @@
     <uses-permission android:name="android.permission.VIBRATE"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
-    <uses-permission android:name="android.permission.USE_FINGERPRINT"/>
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-
-    <!-- Foreground service type permission (required for Android 14+) -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING"/>
+    <!-- Voice note in "Describe your problem" -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
 
     <!-- REMOVED CALL_PHONE — use ACTION_DIAL intent instead (user confirms the call) -->
 
@@ -28,8 +24,7 @@
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:hardwareAccelerated="true"
-        android:allowBackup="true"
-        android:fullBackupOnly="true">
+        android:allowBackup="false">
 
         <!-- ── Google Maps API Key ───────────────────────────────────────── -->
         <meta-data
@@ -86,14 +81,10 @@
             </intent-filter>
         </service>
 
-        <!-- ── Notification Foreground Service ───────────────────────────── -->
-        <!-- Declared so Play Protect understands FOREGROUND_SERVICE + WAKE_LOCK -->
-        <!-- are used for delivering notifications, not background surveillance  -->
-        <service
-            android:name=".NotificationForegroundService"
-            android:exported="false"
-            android:foregroundServiceType="remoteMessaging"
-            android:stopWithTask="false"/>
+        <!-- Pushes sent by Cloud Functions use this channel (created in NotificationService). -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="trouble_sarthi_channel"/>
 
         <!-- ── Facebook Login Activity ───────────────────────────────────── -->
         <activity

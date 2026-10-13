@@ -19,9 +19,8 @@ dependencies:
     local_auth: ^3.0.0
     google_fonts: ^6.1.0
     cupertino_icons: ^1.0.8
-    firebase_storage: ^12.4.10
     image_picker: ^1.1.2
-    firebase_messaging: ^15.0.0    # ← ADD THIS
+    firebase_messaging: ^15.0.0
     flutter_local_notifications: ^18.0.0
 
     # ── Firebase ─────────────────────────────────────────────────────────────
@@ -48,6 +47,11 @@ dependencies:
     firebase_database: ^11.3.10
     cached_network_image: ^3.4.1
 
+    # ── Request → pitch → booking flow ───────────────────────────────────────
+    record: ^5.2.0                 # voice note recording
+    audioplayers: ^6.1.0           # voice note playback
+    http: ^1.2.2                   # Cloudinary uploads + push Worker calls
+
     pdf: ^3.11.0
     printing: ^5.13.0
     intl: ^0.19.0
@@ -68,7 +72,7 @@ flutter:
     fonts:
         - family: Saman
           fonts:
-              - asset: assets/fonts/SAMAN___.ttf
+              - asset: assets/fonts/SAMAN___.TTF   # must match the file name exactly (case-sensitive)
 
 flutter_launcher_icons:
     android: true

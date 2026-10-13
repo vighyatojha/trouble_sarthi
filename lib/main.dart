@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'firebase_options.dart';
 import 'screens/splash_screen.dart';
-import 'service/notification_service.dart'; // ← ADD THIS
+import 'service/notification_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -12,15 +12,20 @@ void main() async {
     options: DefaultFirebaseOptions.currentPlatform,
   );
 
-  // ── Initialize FCM + local notification banners ──
-  await NotificationService.instance.init(); // ← ADD THIS
-
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
   ]);
 
   runApp(const TroubleSarthiApp());
+
+  // FCM + local notification banners. Started after the first frame so a
+  // failure (e.g. no Google Play services) can never block the app from opening.
+  try {
+    await NotificationService.instance.init();
+  } catch (e) {
+    debugPrint('NotificationService.init failed: $e');
+  }
 }
 
 class TroubleSarthiApp extends StatelessWidget {
