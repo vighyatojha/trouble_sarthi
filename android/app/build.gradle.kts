@@ -18,10 +18,6 @@ android {
         isCoreLibraryDesugaringEnabled = true
     }
 
-    kotlinOptions {
-        jvmTarget = "17"   // ✅ FIXED (was 11)
-    }
-
     defaultConfig {
         applicationId = "com.example.trouble_sarthi"
         minSdk = flutter.minSdkVersion
@@ -40,6 +36,13 @@ android {
         debug {
             signingConfig = signingConfigs.getByName("debug")
         }
+    }
+}
+
+// Kotlin 2.2 no longer accepts the old kotlinOptions { } block
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 

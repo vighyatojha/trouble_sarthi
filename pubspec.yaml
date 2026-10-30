@@ -13,7 +13,7 @@ dependencies:
         sdk: flutter
 
     # ── UI & Fonts ───────────────────────────────────────────────────────────
-    font_awesome_flutter: ^10.7.0
+    font_awesome_flutter: ^11.0.0   # 10.x breaks on Flutter 3.44 (IconData is final)
 
     path_provider: ^2.1.2
     local_auth: ^3.0.0
@@ -40,7 +40,7 @@ dependencies:
     url_launcher: ^6.2.5
     google_sign_in: ^6.2.2
     shared_preferences: ^2.2.2
-    flutter_facebook_auth: ^7.1.5
+    flutter_facebook_auth: ^7.3.2
 
     # ── NEW: Add these two lines ─────────────────────────────────────────────
     connectivity_plus: ^6.1.4
@@ -48,7 +48,7 @@ dependencies:
     cached_network_image: ^3.4.1
 
     # ── Request → pitch → booking flow ───────────────────────────────────────
-    record: ^5.2.0                 # voice note recording
+    record: ^7.1.2                 # voice note recording (5.x breaks on Flutter 3.44)
     audioplayers: ^6.1.0           # voice note playback
     http: ^1.2.2                   # Cloudinary uploads + push Worker calls
 
