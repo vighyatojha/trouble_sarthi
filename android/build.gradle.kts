@@ -28,19 +28,23 @@ subprojects {
 // Fixes: "Inconsistent JVM-target compatibility detected for tasks
 // 'compileReleaseJavaWithJavac' (1.8) and 'compileReleaseKotlin' (23)"
 // (seen in flutter_facebook_auth and other older plugins).
+//
+// The Java target is read lazily from the matching Java compile task
+// (e.g. compileReleaseKotlin -> compileReleaseJavaWithJavac) only when the
+// Kotlin task runs, so it never touches compileOptions before the Android
+// Gradle Plugin has finalized them ("targetCompatibility is not yet finalized").
 subprojects {
-    val alignKotlinTarget: Project.() -> Unit = {
-        val android = extensions.findByName("android") as? com.android.build.gradle.BaseExtension
-        if (android != null) {
-            val javaTarget = android.compileOptions.targetCompatibility.toString()
-            tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-                compilerOptions.jvmTarget.set(
-                    org.jetbrains.kotlin.gradle.dsl.JvmTarget.fromTarget(javaTarget)
-                )
+    val projectTasks = tasks
+    projectTasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+        val javaTaskName = name.replace("Kotlin", "JavaWithJavac")
+        compilerOptions.jvmTarget.set(
+            project.provider {
+                val javaTask = projectTasks.findByName(javaTaskName) as? JavaCompile
+                val javaTarget = javaTask?.targetCompatibility ?: "17"
+                org.jetbrains.kotlin.gradle.dsl.JvmTarget.fromTarget(javaTarget)
             }
-        }
+        )
     }
-    if (state.executed) alignKotlinTarget() else afterEvaluate { alignKotlinTarget() }
 }
 
 tasks.register<Delete>("clean") {
