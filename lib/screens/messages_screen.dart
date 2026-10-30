@@ -1,8 +1,15 @@
 // ignore_for_file: use_build_context_synchronously
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import '../core/booking_chat_scree.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../core/booking_chat_screen.dart';
+import '../core/chat_unread.dart';
+import '../core/sarthi_ui.dart';
+import '../request/booking_tracker_screen.dart';
+import '../request/request_pitches_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GLOBAL NOTIFICATION COUNT
@@ -14,80 +21,7 @@ class NotificationCountNotifier extends ValueNotifier<int> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MERGED CHAT  — deduplicates two Firestore docs for the same booking
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _MergedChat {
-  /// The chatId that actually has messages in Realtime DB (use for navigation)
-  final String chatId;
-
-  /// All Firestore doc IDs that belong to this chat (needed for bulk-delete)
-  final Set<String> allDocIds;
-
-  /// Merged display fields (otherName/photo from whichever doc has them,
-  /// lastMessage/lastMessageTime from the active doc)
-  final Map<String, dynamic> data;
-
-  const _MergedChat({
-    required this.chatId,
-    required this.allDocIds,
-    required this.data,
-  });
-
-  factory _MergedChat.fromDoc(QueryDocumentSnapshot doc) => _MergedChat(
-    chatId: doc.id,
-    allDocIds: {doc.id},
-    data: Map<String, dynamic>.from(doc.data() as Map),
-  );
-
-  _MergedChat mergeWith(QueryDocumentSnapshot other) {
-    final otherData = other.data() as Map<String, dynamic>;
-    final myMsg    = data['lastMessage']    as String?    ?? '';
-    final otherMsg = otherData['lastMessage'] as String?  ?? '';
-    final myTs     = data['lastMessageTime']    as Timestamp?;
-    final otherTs  = otherData['lastMessageTime'] as Timestamp?;
-
-    // "Active" chatId = whichever doc has messages (or is more recent)
-    String activeChatId = chatId;
-    if (myMsg.isEmpty && otherMsg.isNotEmpty) {
-      activeChatId = other.id;
-    } else if (myMsg.isNotEmpty && otherMsg.isNotEmpty) {
-      if (otherTs != null &&
-          (myTs == null || otherTs.compareTo(myTs) > 0)) {
-        activeChatId = other.id;
-      }
-    }
-
-    // Merge display fields — prefer non-empty values
-    final merged = Map<String, dynamic>.from(data);
-    for (final entry in otherData.entries) {
-      final existing = merged[entry.key];
-      if (existing == null ||
-          (existing is String && existing.isEmpty) ||
-          existing == false) {
-        merged[entry.key] = entry.value;
-      }
-    }
-
-    // Always show the active doc's lastMessage / timestamp
-    if (activeChatId == other.id) {
-      if (otherMsg.isNotEmpty) merged['lastMessage'] = otherMsg;
-      if (otherTs != null)     merged['lastMessageTime'] = otherTs;
-    } else {
-      if (myMsg.isNotEmpty) merged['lastMessage'] = myMsg;
-      if (myTs != null)     merged['lastMessageTime'] = myTs;
-    }
-
-    return _MergedChat(
-      chatId: activeChatId,
-      allDocIds: {...allDocIds, other.id},
-      data: merged,
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ACTIVITY SCREEN
+// ACTIVITY SCREEN  (bottom-nav "Messages" tab: chats + notifications)
 // ─────────────────────────────────────────────────────────────────────────────
 
 class ServicesScreen extends StatefulWidget {
@@ -97,36 +31,120 @@ class ServicesScreen extends StatefulWidget {
   State<ServicesScreen> createState() => _ServicesScreenState();
 }
 
-class _ServicesScreenState extends State<ServicesScreen>
-    with SingleTickerProviderStateMixin {
+class _ServicesScreenState extends State<ServicesScreen> with SingleTickerProviderStateMixin {
   late final TabController _tab;
+  final _searchCtrl = TextEditingController();
+  bool _searching = false;
+  String _query = '';
+
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _notifSub;
+  int _unreadNotifications = 0;
 
   @override
   void initState() {
     super.initState();
     _tab = TabController(length: 2, vsync: this);
+    _tab.addListener(() {
+      if (!_tab.indexIsChanging && mounted) setState(() {});
+    });
+    // One place keeps the Messages badge right: unread chats + unread notifications.
+    ChatUnread.instance.start();
+    ChatUnread.instance.unreadCount.addListener(_syncBadge);
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid != null) {
+      _notifSub = FirebaseFirestore.instance
+          .collection('notifications')
+          .doc(uid)
+          .collection('items')
+          .where('read', isEqualTo: false)
+          .snapshots()
+          .listen((s) {
+        _unreadNotifications = s.size;
+        _syncBadge();
+      }, onError: (_) {});
+    }
+  }
+
+  void _syncBadge() {
+    final total = ChatUnread.instance.unreadCount.value + _unreadNotifications;
+    if (NotificationCountNotifier.instance.value != total) NotificationCountNotifier.instance.value = total;
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    ChatUnread.instance.unreadCount.removeListener(_syncBadge);
+    _notifSub?.cancel();
+    _searchCtrl.dispose();
     _tab.dispose();
     super.dispose();
   }
 
+  void _toggleSearch() {
+    setState(() {
+      _searching = !_searching;
+      if (!_searching) {
+        _searchCtrl.clear();
+        _query = '';
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
+    final chats = ChatUnread.instance.unreadCount.value;
     return Scaffold(
-      backgroundColor: const Color(0xFFF4F6FB),
+      backgroundColor: SarthiColors.page,
       body: Column(
         children: [
-          _ActivityHeader(tabController: _tab),
+          SarthiTabHeader(
+            title: 'Activity',
+            subtitle: chats > 0
+                ? '$chats chat${chats == 1 ? '' : 's'} with new messages'
+                : 'Chats with your helpers and booking updates',
+            tabController: _tab,
+            tabs: [
+              chats > 0 ? 'Messages ($chats)' : 'Messages',
+              _unreadNotifications > 0 ? 'Notifications ($_unreadNotifications)' : 'Notifications',
+            ],
+            actions: [
+              if (_tab.index == 0)
+                SarthiHeaderButton(
+                  icon: _searching ? Icons.close_rounded : Icons.search_rounded,
+                  active: _searching,
+                  onTap: _toggleSearch,
+                ),
+            ],
+            below: _searching && _tab.index == 0
+                ? Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+              child: TextField(
+                controller: _searchCtrl,
+                autofocus: true,
+                style: const TextStyle(color: Colors.white),
+                cursorColor: Colors.white,
+                onChanged: (v) => setState(() => _query = v.trim().toLowerCase()),
+                decoration: InputDecoration(
+                  hintText: 'Search by name or service',
+                  hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.6)),
+                  prefixIcon: Icon(Icons.search_rounded, color: Colors.white.withValues(alpha: 0.8), size: 20),
+                  filled: true,
+                  fillColor: Colors.white.withValues(alpha: 0.13),
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(vertical: 11),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
+                ),
+              ),
+            )
+                : null,
+          ),
           Expanded(
             child: TabBarView(
               controller: _tab,
               physics: const NeverScrollableScrollPhysics(),
-              children: const [
-                _MessagesTab(),
-                _NotificationsTab(),
+              children: [
+                _MessagesTab(query: _query),
+                const _NotificationsTab(),
               ],
             ),
           ),
@@ -137,724 +155,261 @@ class _ServicesScreenState extends State<ServicesScreen>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HEADER
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _ActivityHeader extends StatelessWidget {
-  final TabController tabController;
-  const _ActivityHeader({required this.tabController});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFF1E0640), Color(0xFF3B0764), Color(0xFF5B21B6)],
-        ),
-      ),
-      child: SafeArea(
-        bottom: false,
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(8, 10, 20, 10),
-              child: Row(
-                children: [
-                  IconButton(
-                    onPressed: () => Navigator.of(context).maybePop(),
-                    icon: const Icon(Icons.arrow_back_ios_new_rounded,
-                        color: Colors.white, size: 18),
-                    splashRadius: 22,
-                  ),
-                  const Text(
-                    'Activity',
-                    style: TextStyle(
-                      fontSize: 19,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                      letterSpacing: 0.2,
-                    ),
-                  ),
-                  const Spacer(),
-                  Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.14),
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(Icons.search_rounded,
-                        color: Colors.white, size: 18),
-                  ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Container(
-                height: 42,
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.13),
-                  borderRadius: BorderRadius.circular(26),
-                ),
-                padding: const EdgeInsets.all(3),
-                child: TabBar(
-                  controller: tabController,
-                  indicator: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(22),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.08),
-                        blurRadius: 6,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
-                  ),
-                  indicatorPadding: EdgeInsets.zero,
-                  dividerColor: Colors.transparent,
-                  indicatorSize: TabBarIndicatorSize.tab,
-                  labelColor: const Color(0xFF7C3AED),
-                  unselectedLabelColor: Colors.white.withOpacity(0.70),
-                  labelStyle: const TextStyle(
-                      fontWeight: FontWeight.bold, fontSize: 12.5),
-                  unselectedLabelStyle: const TextStyle(
-                      fontWeight: FontWeight.w500, fontSize: 12.5),
-                  tabs: const [
-                    Tab(text: 'Messages'),
-                    Tab(text: 'Notifications'),
-                  ],
-                ),
-              ),
-            ),
-            Container(
-              height: 24,
-              margin: const EdgeInsets.only(top: 10),
-              decoration: const BoxDecoration(
-                color: Color(0xFFF4F6FB),
-                borderRadius: BorderRadius.only(
-                  topLeft: Radius.circular(26),
-                  topRight: Radius.circular(26),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MESSAGES TAB
+// MESSAGES TAB  — one card per booking chat (chats/{bookingId})
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _MessagesTab extends StatefulWidget {
-  const _MessagesTab();
+  final String query;
+  const _MessagesTab({required this.query});
 
   @override
   State<_MessagesTab> createState() => _MessagesTabState();
 }
 
 class _MessagesTabState extends State<_MessagesTab> {
-  // Selection tracks by merged chatId (the active one)
-  final Set<String> _selected = {};
-  bool get _isSelecting => _selected.isNotEmpty;
+  Stream<QuerySnapshot<Map<String, dynamic>>>? _stream;
+  String _streamUid = '';
 
-  void _toggleSelect(String chatId) {
-    setState(() {
-      if (_selected.contains(chatId)) {
-        _selected.remove(chatId);
-      } else {
-        _selected.add(chatId);
-      }
-    });
+  Stream<QuerySnapshot<Map<String, dynamic>>> _chats(String uid) {
+    if (_stream == null || _streamUid != uid) {
+      _streamUid = uid;
+      _stream = FirebaseFirestore.instance.collection('chats').where('participants', arrayContains: uid).snapshots();
+    }
+    return _stream!;
   }
 
-  void _clearSelection() => setState(() => _selected.clear());
+  static const _active = {'confirmed', 'on_the_way', 'arrived', 'in_progress', 'work_done'};
 
-  Future<void> _deleteSelected(List<_MergedChat> mergedChats) async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Delete Chats',
-            style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
-        content: Text(
-          'Delete ${_selected.length} conversation${_selected.length > 1 ? 's' : ''}? This cannot be undone.',
-          style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280)),
+  void _open(String chatId, Map<String, dynamic> d) {
+    final me = FirebaseAuth.instance.currentUser?.displayName;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => BookingChatScreen(
+          bookingId: chatId,
+          otherName: '${d['helperName'] ?? d['otherName'] ?? 'Helper'}',
+          otherPhotoUrl: '${d['helperPhoto'] ?? ''}',
+          myName: (me != null && me.isNotEmpty) ? me : '${d['customerName'] ?? 'Customer'}',
+          myRole: 'customer',
+          subtitle: '${d['serviceName'] ?? ''}',
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel',
-                style: TextStyle(color: Color(0xFF6B7280), fontSize: 13)),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFDC2626),
-              elevation: 0,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12)),
-            ),
-            child: const Text('Delete',
-                style: TextStyle(color: Colors.white, fontSize: 13)),
-          ),
-        ],
       ),
     );
-
-    if (confirm != true) return;
-
-    // Collect ALL Firestore doc IDs for each selected merged chat
-    final allIdsToDelete = <String>{};
-    for (final mc in mergedChats) {
-      if (_selected.contains(mc.chatId)) {
-        allIdsToDelete.addAll(mc.allDocIds);
-      }
-    }
-
-    // Chats belong to both people on a booking, so they can't be deleted from
-    // one phone (security rules forbid it). They close automatically after the job.
-    _clearSelection();
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Chats close automatically 7 days after the job is completed.'),
-        behavior: SnackBarBehavior.floating,
-      ));
-    }
-  }
-
-  // ── Deduplicate raw Firestore docs into merged chats ──────────────────────
-  List<_MergedChat> _mergeChats(
-      List<QueryDocumentSnapshot> sorted, String uid) {
-    final Map<String, _MergedChat> byKey = {};
-
-    for (final doc in sorted) {
-      final data      = doc.data() as Map<String, dynamic>;
-      final bookingId = data['bookingId'] as String? ?? '';
-      final helperId  = data['helperId']  as String? ?? '';
-
-      // Group key: bookingId > helperId > doc.id
-      final key = bookingId.isNotEmpty
-          ? bookingId
-          : helperId.isNotEmpty
-          ? helperId
-          : doc.id;
-
-      if (!byKey.containsKey(key)) {
-        byKey[key] = _MergedChat.fromDoc(doc);
-      } else {
-        byKey[key] = byKey[key]!.mergeWith(doc);
-      }
-    }
-
-    // Re-sort merged results by lastMessageTime descending
-    final result = byKey.values.toList();
-    result.sort((a, b) {
-      final aTs = a.data['lastMessageTime'] as Timestamp?;
-      final bTs = b.data['lastMessageTime'] as Timestamp?;
-      if (aTs == null && bTs == null) return 0;
-      if (aTs == null) return 1;
-      if (bTs == null) return -1;
-      return bTs.compareTo(aTs);
-    });
-    return result;
   }
 
   @override
   Widget build(BuildContext context) {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) {
-      return const _EmptyState(
-          icon: Icons.chat_bubble_outline_rounded,
-          message: 'Sign in to view messages');
+      return const SarthiEmpty(icon: Icons.chat_bubble_outline_rounded, title: 'Sign in to view messages');
     }
 
-    return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('chats')
-          .where('participants', arrayContains: uid)
-          .snapshots(),
-      builder: (context, snap) {
-        if (snap.connectionState == ConnectionState.waiting && !snap.hasData) {
-          return const Center(
-              child: CircularProgressIndicator(
-                  color: Color(0xFF7C3AED), strokeWidth: 2));
-        }
+    return ValueListenableBuilder<int>(
+      valueListenable: ChatUnread.instance.revision,
+      builder: (context, _, __) => StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: _chats(uid),
+        builder: (context, snap) {
+          if (snap.hasError) {
+            return const SarthiEmpty(
+              icon: Icons.cloud_off_rounded,
+              title: 'Could not load chats',
+              message: 'Check your internet connection and try again.',
+            );
+          }
+          if (!snap.hasData) {
+            return const Center(child: CircularProgressIndicator(color: SarthiColors.purple, strokeWidth: 2));
+          }
 
-        if (snap.hasError) {
-          return const _EmptyState(
-            icon: Icons.chat_bubble_outline_rounded,
-            message:
-            'No messages yet\nConversations with helpers will appear here',
+          // Only chats from the new booking flow (they carry a jobId). Chats from
+          // the old app version stay in the database but are not listed.
+          final docs = snap.data!.docs.where((doc) {
+            final d = doc.data();
+            return '${d['jobId'] ?? ''}'.isNotEmpty && '${d['helperId'] ?? ''}'.isNotEmpty;
+          }).toList();
+
+          final q = widget.query;
+          final filtered = q.isEmpty
+              ? docs
+              : docs.where((doc) {
+            final d = doc.data();
+            final hay = '${d['helperName'] ?? ''} ${d['otherName'] ?? ''} ${d['serviceName'] ?? ''} ${d['lastMessage'] ?? ''}'
+                .toLowerCase();
+            return hay.contains(q);
+          }).toList();
+
+          // Unread first, then active bookings, then newest message.
+          int rank(Map<String, dynamic> d, String id) =>
+              (ChatUnread.instance.isUnread(d, id) ? 0 : 2) + (_active.contains(d['bookingStatus']) ? 0 : 1);
+          filtered.sort((a, b) {
+            final r = rank(a.data(), a.id).compareTo(rank(b.data(), b.id));
+            if (r != 0) return r;
+            final at = a.data()['lastMessageTime'], bt = b.data()['lastMessageTime'];
+            if (at is! Timestamp) return 1;
+            if (bt is! Timestamp) return -1;
+            return bt.compareTo(at);
+          });
+
+          if (docs.isEmpty) {
+            return const SarthiEmpty(
+              icon: Icons.chat_bubble_outline_rounded,
+              title: 'No chats yet',
+              message: 'When you book a helper, you can chat with them here.',
+            );
+          }
+          if (filtered.isEmpty) {
+            return SarthiEmpty(icon: Icons.search_off_rounded, title: 'No chats match "${widget.query}"');
+          }
+
+          final activeList = filtered.where((d) => _active.contains(d.data()['bookingStatus'])).toList();
+          final pastList = filtered.where((d) => !_active.contains(d.data()['bookingStatus'])).toList();
+
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 130),
+            children: [
+              if (activeList.isNotEmpty) ...[
+                const SarthiSectionLabel('Active bookings'),
+                for (final doc in activeList)
+                  _ConversationCard(
+                    data: doc.data(),
+                    unread: ChatUnread.instance.isUnread(doc.data(), doc.id),
+                    onTap: () => _open(doc.id, doc.data()),
+                  ),
+              ],
+              if (pastList.isNotEmpty) ...[
+                const SarthiSectionLabel('Past bookings'),
+                for (final doc in pastList)
+                  _ConversationCard(
+                    data: doc.data(),
+                    unread: ChatUnread.instance.isUnread(doc.data(), doc.id),
+                    onTap: () => _open(doc.id, doc.data()),
+                  ),
+              ],
+            ],
           );
-        }
-
-        final allDocs = snap.data?.docs ?? [];
-
-        // ✅ Only show chats where a helper has been assigned (post-acceptance)
-        final docs = allDocs.where((doc) {
-          final d       = doc.data() as Map<String, dynamic>;
-          final status  = (d['bookingStatus'] as String?) ?? '';
-          final helperId = (d['helperId'] as String?) ?? '';
-          return helperId.isNotEmpty &&
-              status != 'pending' &&
-              status.isNotEmpty;
-        }).toList();
-
-        // Sort raw docs first
-        final sorted = [...docs]..sort((a, b) {
-          final aTs = (a.data() as Map)['lastMessageTime'] as Timestamp?;
-          final bTs = (b.data() as Map)['lastMessageTime'] as Timestamp?;
-          if (aTs == null && bTs == null) return 0;
-          if (aTs == null) return 1;
-          if (bTs == null) return -1;
-          return bTs.compareTo(aTs);
-        });
-
-        // ── KEY FIX: merge duplicate docs for the same booking ────────────
-        final mergedChats = _mergeChats(sorted, uid);
-
-        if (mergedChats.isEmpty) {
-          return const _EmptyState(
-            icon: Icons.chat_bubble_outline_rounded,
-            message:
-            'No messages yet\nConversations with helpers will appear here',
-          );
-        }
-
-        return Column(
-          children: [
-            // ── Selection action bar ──────────────────────────────────
-            if (_isSelecting)
-              Container(
-                margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                padding:
-                const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1E0640),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Row(
-                  children: [
-                    GestureDetector(
-                      onTap: _clearSelection,
-                      child: const Icon(Icons.close_rounded,
-                          color: Colors.white, size: 18),
-                    ),
-                    const SizedBox(width: 12),
-                    Text(
-                      '${_selected.length} selected',
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600),
-                    ),
-                    const Spacer(),
-                    GestureDetector(
-                      onTap: () => _deleteSelected(mergedChats),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 14, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFDC2626),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.delete_outline_rounded,
-                                color: Colors.white, size: 14),
-                            SizedBox(width: 5),
-                            Text('Delete',
-                                style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.bold)),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-            // ── Conversation list ──────────────────────────────────────
-            Expanded(
-              child: ListView.builder(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 130),
-                itemCount: mergedChats.length,
-                itemBuilder: (_, i) {
-                  final mc         = mergedChats[i];
-                  final isSelected = _selected.contains(mc.chatId);
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: _ConversationCard(
-                      mergedChat:  mc,
-                      currentUid:  uid,
-                      isSelected:  isSelected,
-                      isSelecting: _isSelecting,
-                      onTap: () {
-                        if (_isSelecting) {
-                          _toggleSelect(mc.chatId);
-                          return;
-                        }
-                        final data          = mc.data;
-                        final bookingStatus = data['bookingStatus'] as String? ?? 'active';
-                        // Block navigation for completed / cancelled
-                        if (bookingStatus == 'completed' || bookingStatus == 'cancelled') return;
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => BookingChatScreen(
-                              bookingId: mc.chatId,
-                              otherName: data['helperName'] as String? ??
-                                  data['otherName'] as String? ?? 'Helper',
-                              myName: FirebaseAuth.instance.currentUser?.displayName ??
-                                  data['customerName'] as String? ?? 'Customer',
-                              myRole: 'customer',
-                              subtitle: data['serviceName'] as String? ?? '',
-                            ),
-                          ),
-                        );
-                      },
-                      onLongPress: () => _toggleSelect(mc.chatId),
-                    ),
-                  );
-                },
-              ),
-            ),
-          ],
-        );
-      },
+        },
+      ),
     );
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CONVERSATION CARD  — now uses _MergedChat
+// CONVERSATION CARD
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _ConversationCard extends StatelessWidget {
-  final _MergedChat  mergedChat;
-  final String       currentUid;
-  final bool         isSelected;
-  final bool         isSelecting;
+  final Map<String, dynamic> data;
+  final bool unread;
   final VoidCallback onTap;
-  final VoidCallback onLongPress;
+  const _ConversationCard({required this.data, required this.unread, required this.onTap});
 
-  const _ConversationCard({
-    required this.mergedChat,
-    required this.currentUid,
-    required this.isSelected,
-    required this.isSelecting,
-    required this.onTap,
-    required this.onLongPress,
-  });
+  static (String, Color) _status(String s) => switch (s) {
+    'confirmed' => ('Confirmed', SarthiColors.purple),
+    'on_the_way' => ('On the way', const Color(0xFF0891B2)),
+    'arrived' => ('Arrived', const Color(0xFF0891B2)),
+    'in_progress' => ('Working', SarthiColors.amber),
+    'work_done' => ('Work done', SarthiColors.green),
+    'completed' => ('Completed', SarthiColors.green),
+    'cancelled' => ('Cancelled', SarthiColors.red),
+    _ => ('Booking', SarthiColors.muted),
+  };
 
   @override
   Widget build(BuildContext context) {
-    final data          = mergedChat.data;
-    final helperName    = data['otherName']    as String? ?? 'Helper';
-    final serviceName   = data['serviceName']  as String? ?? '';
-    final lastMsg       = data['lastMessage']  as String? ?? '';
-    final unread        = (data['unreadCount_$currentUid'] as int?) ?? 0;
-    final isOnline      = data['helperOnline'] as bool?   ?? false;
-    final photoUrl      = data['helperPhoto']  as String? ?? '';
-    final ts            = data['lastMessageTime'] as Timestamp?;
-    final timeStr       = ts != null ? _fmtTime(ts.toDate()) : '';
-    final initial       = helperName.isNotEmpty ? helperName[0].toUpperCase() : 'H';
-    final bookingStatus = data['bookingStatus'] as String? ?? 'active';
-    final isCompleted   = bookingStatus == 'completed';
-    final isCancelled   = bookingStatus == 'cancelled';
-    final isInactive    = isCompleted || isCancelled;
+    final name = '${data['helperName'] ?? data['otherName'] ?? 'Helper'}';
+    final service = '${data['serviceName'] ?? ''}';
+    final photo = '${data['helperPhoto'] ?? ''}';
+    final lastMsg = '${data['lastMessage'] ?? ''}';
+    final mineLast = data['lastSenderId'] == FirebaseAuth.instance.currentUser?.uid;
+    final ts = data['lastMessageTime'];
+    final time = ts is Timestamp ? sarthiShortTime(ts.toDate()) : '';
+    final statusKey = '${data['bookingStatus'] ?? ''}';
+    final (statusText, statusColor) = _status(statusKey);
+    final closed = statusKey == 'cancelled';
+    final finished = statusKey == 'completed';
+    final preview = closed
+        ? 'Booking cancelled · chat closed'
+        : finished
+        ? 'Job completed · chat closed'
+        : lastMsg.isEmpty
+        ? 'Say hello and share details about the work'
+        : '${mineLast ? 'You: ' : ''}$lastMsg';
 
-    return GestureDetector(
-      onTap: onTap,
-      onLongPress: onLongPress,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFFEDE9FE) : Colors.white,
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
           borderRadius: BorderRadius.circular(18),
-          border: Border.all(
-            color: isSelected ? const Color(0xFF7C3AED) : Colors.transparent,
-            width: isSelected ? 1.5 : 1,
-          ),
-          boxShadow: isSelected
-              ? []
-              : [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.05),
-              blurRadius: 10,
-              offset: const Offset(0, 3),
+          onTap: onTap,
+          child: Ink(
+            decoration: sarthiCard(
+              color: unread ? const Color(0xFFFAF8FF) : Colors.white,
+              border: unread ? SarthiColors.purple.withValues(alpha: 0.25) : null,
             ),
-          ],
-        ),
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // ── Select checkbox ─────────────────────────────────────
-              if (isSelecting)
-                Padding(
-                  padding: const EdgeInsets.only(right: 10, top: 4),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 180),
-                    width: 22,
-                    height: 22,
-                    decoration: BoxDecoration(
-                      color: isSelected
-                          ? const Color(0xFF7C3AED)
-                          : Colors.transparent,
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: isSelected
-                            ? const Color(0xFF7C3AED)
-                            : const Color(0xFFD1D5DB),
-                        width: 2,
-                      ),
-                    ),
-                    child: isSelected
-                        ? const Icon(Icons.check_rounded,
-                        color: Colors.white, size: 13)
-                        : null,
-                  ),
-                ),
-
-              // ── Avatar ──────────────────────────────────────────────
-              Stack(
-                children: [
-                  Opacity(
-                    opacity: isInactive ? 0.5 : 1.0,
-                    child: Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFFA78BFA), Color(0xFF7C3AED)],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                        ),
-                        image: photoUrl.isNotEmpty
-                            ? DecorationImage(
-                            image: NetworkImage(photoUrl),
-                            fit: BoxFit.cover)
-                            : null,
-                      ),
-                      child: photoUrl.isEmpty
-                          ? Center(
-                          child: Text(initial,
-                              style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 18)))
-                          : null,
-                    ),
-                  ),
-                  if (isOnline && !isInactive)
-                    Positioned(
-                      right: 1,
-                      bottom: 1,
-                      child: Container(
-                        width: 11,
-                        height: 11,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF22C55E),
-                          shape: BoxShape.circle,
-                          border:
-                          Border.all(color: Colors.white, width: 1.5),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
+            padding: const EdgeInsets.all(14),
+            child: Row(children: [
+              SarthiAvatar(name: name, photoUrl: photo, size: 50, dimmed: closed),
               const SizedBox(width: 12),
-
-              // ── Content ─────────────────────────────────────────────
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            helperName,
-                            style: TextStyle(
-                              fontSize: 13.5,
-                              fontWeight: unread > 0
-                                  ? FontWeight.bold
-                                  : FontWeight.w600,
-                              color: isInactive
-                                  ? const Color(0xFF9CA3AF)
-                                  : const Color(0xFF1F2937),
-                            ),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        Text(
-                          timeStr,
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(children: [
+                    Expanded(
+                      child: Text(name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: TextStyle(
-                            fontSize: 11,
-                            color: unread > 0
-                                ? const Color(0xFF7C3AED)
-                                : const Color(0xFF9CA3AF),
-                            fontWeight: unread > 0
-                                ? FontWeight.w600
-                                : FontWeight.normal,
-                          ),
-                        ),
-                      ],
+                            fontSize: 14,
+                            fontWeight: unread ? FontWeight.w800 : FontWeight.w600,
+                            color: closed ? SarthiColors.faint : SarthiColors.ink,
+                          )),
                     ),
-
-                    if (serviceName.isNotEmpty) ...[
-                      const SizedBox(height: 3),
-                      Row(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 7, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: isInactive
-                                  ? const Color(0xFFF3F4F6)
-                                  : const Color(0xFFEDE9FE),
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  Icons.build_circle_outlined,
-                                  size: 10,
-                                  color: isInactive
-                                      ? const Color(0xFF9CA3AF)
-                                      : const Color(0xFF7C3AED),
-                                ),
-                                const SizedBox(width: 3),
-                                Text(
-                                  serviceName,
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w600,
-                                    color: isInactive
-                                        ? const Color(0xFF9CA3AF)
-                                        : const Color(0xFF7C3AED),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          if (isCompleted)
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 7, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFD1FAE5),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: const Text('Completed',
-                                  style: TextStyle(
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                      color: Color(0xFF065F46))),
-                            )
-                          else if (isCancelled)
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 7, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFFEE2E2),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: const Text('Cancelled',
-                                  style: TextStyle(
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                      color: Color(0xFF991B1B))),
-                            ),
-                        ],
+                    Text(time,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: unread ? SarthiColors.purple : SarthiColors.faint,
+                          fontWeight: unread ? FontWeight.w700 : FontWeight.normal,
+                        )),
+                  ]),
+                  const SizedBox(height: 4),
+                  Row(children: [
+                    if (service.isNotEmpty) ...[
+                      Flexible(
+                        child: SarthiChip(service, color: SarthiColors.purple, icon: Icons.build_circle_outlined),
+                      ),
+                      const SizedBox(width: 6),
+                    ],
+                    SarthiChip(statusText, color: statusColor),
+                  ]),
+                  const SizedBox(height: 6),
+                  Row(children: [
+                    Expanded(
+                      child: Text(preview,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            color: unread ? SarthiColors.body : SarthiColors.faint,
+                            fontWeight: unread ? FontWeight.w600 : FontWeight.normal,
+                            fontStyle: (lastMsg.isEmpty || closed || finished) ? FontStyle.italic : FontStyle.normal,
+                          )),
+                    ),
+                    if (unread) ...[
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                        decoration: BoxDecoration(color: SarthiColors.purple, borderRadius: BorderRadius.circular(10)),
+                        child: const Text('New',
+                            style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
                       ),
                     ],
-
-                    const SizedBox(height: 5),
-
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            isCompleted
-                                ? 'Service completed — chat closed'
-                                : isCancelled
-                                ? 'Booking cancelled — chat closed'
-                                : lastMsg.isEmpty
-                                ? 'No messages yet'
-                                : lastMsg,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: isInactive
-                                  ? const Color(0xFFB0B8CC)
-                                  : unread > 0
-                                  ? const Color(0xFF374151)
-                                  : const Color(0xFF9CA3AF),
-                              fontWeight: unread > 0 && !isInactive
-                                  ? FontWeight.w500
-                                  : FontWeight.normal,
-                              fontStyle: isInactive
-                                  ? FontStyle.italic
-                                  : FontStyle.normal,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        if (unread > 0 && !isInactive) ...[
-                          const SizedBox(width: 6),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF7C3AED),
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                            child: Text(
-                              unread > 9 ? '9+' : '$unread',
-                              style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.bold),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ],
-                ),
+                  ]),
+                ]),
               ),
-            ],
+            ]),
           ),
         ),
       ),
     );
-  }
-
-  String _fmtTime(DateTime dt) {
-    final now  = DateTime.now();
-    final diff = now.difference(dt);
-    if (diff.inDays == 0) {
-      return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-    } else if (diff.inDays == 1) {
-      return 'Yesterday';
-    } else {
-      return '${dt.day}/${dt.month}';
-    }
   }
 }
 
@@ -896,10 +451,6 @@ class _NotificationsTabState extends State<_NotificationsTab> {
         final docs = snap.data?.docs ?? [];
         final unreadCount =
             docs.where((d) => (d.data() as Map)['read'] != true).length;
-
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          NotificationCountNotifier.instance.value = unreadCount;
-        });
 
         if (docs.isEmpty) {
           return const _EmptyState(
@@ -1027,11 +578,25 @@ class _NotificationCard extends StatelessWidget {
       if (!isRead) doc.reference.update({'read': true});
     }
 
+    // Tapping an update opens the booking or the request it is about.
+    void open() {
+      markRead();
+      final bookingId = '${data['bookingId'] ?? ''}';
+      final jobId = '${data['jobId'] ?? ''}';
+      Widget? page;
+      if (bookingId.isNotEmpty && type != 'new_pitch') {
+        page = BookingTrackerScreen(bookingId: bookingId);
+      } else if (jobId.isNotEmpty) {
+        page = RequestPitchesScreen(jobId: jobId);
+      }
+      if (page != null) Navigator.of(context).push(MaterialPageRoute(builder: (_) => page!));
+    }
+
     if (type == 'offer') {
       return Padding(
         padding: const EdgeInsets.only(bottom: 10),
         child: GestureDetector(
-          onTap: markRead,
+          onTap: open,
           child: Container(
             decoration: BoxDecoration(
               color:
@@ -1160,7 +725,7 @@ class _NotificationCard extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: GestureDetector(
-        onTap: markRead,
+        onTap: open,
         child: Container(
           padding: const EdgeInsets.all(13),
           decoration: BoxDecoration(
@@ -1292,6 +857,30 @@ class _NotificationCard extends StatelessWidget {
 
   _Cfg _cfg(String type) {
     switch (type) {
+    // Types written by the notify Worker.
+      case 'new_pitch':
+        return _Cfg(Icons.local_offer_rounded, const Color(0xFFD97706), 'Compare quotes', Icons.compare_arrows_rounded);
+      case 'status_on_the_way':
+        return _Cfg(Icons.directions_bike_rounded, const Color(0xFF0891B2), 'Track', Icons.navigation_rounded);
+      case 'status_arrived':
+        return _Cfg(Icons.location_on_rounded, const Color(0xFF0891B2), 'Show start code', Icons.pin_rounded);
+      case 'status_in_progress':
+        return _Cfg(Icons.handyman_rounded, const Color(0xFFD97706), 'View booking', Icons.arrow_forward_rounded);
+      case 'status_work_done':
+        return _Cfg(Icons.task_alt_rounded, const Color(0xFF059669), 'Pay & confirm', Icons.payments_rounded);
+      case 'completed_customer':
+        return _Cfg(Icons.verified_rounded, const Color(0xFF059669), 'Rate helper', Icons.star_rounded);
+      case 'cancelled_by_helper':
+        return _Cfg(Icons.cancel_rounded, const Color(0xFFDC2626), 'See other quotes', Icons.arrow_forward_rounded);
+      case 'job_no_pitches':
+      case 'job_expired':
+        return _Cfg(Icons.hourglass_bottom_rounded, const Color(0xFF6B7280));
+      case 'review_waiting_customer':
+        return _Cfg(Icons.lock_clock_rounded, const Color(0xFFD97706), 'Rate to see review', Icons.star_rounded);
+      case 'reviews_revealed_customer':
+        return _Cfg(Icons.handshake_rounded, const Color(0xFF7C3AED), 'See review', Icons.visibility_rounded);
+      case 'overdue':
+        return _Cfg(Icons.schedule_rounded, const Color(0xFFD97706), 'Open booking', Icons.arrow_forward_rounded);
       case 'booking_confirmed':
         return _Cfg(Icons.check_circle_rounded, const Color(0xFF7C3AED),
             'View Booking', Icons.calendar_today_rounded);

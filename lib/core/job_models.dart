@@ -428,11 +428,8 @@ class Booking {
           DateTime.now().isAfter(workDoneAt!.add(const Duration(hours: 24)));
 
   /// Chat stays open while active and for 7 days after completion.
-  bool get chatOpen =>
-      isActive ||
-          (status == BookingStatus.completed &&
-              completedAt != null &&
-              DateTime.now().isBefore(completedAt!.add(const Duration(days: 7))));
+  /// Chat is open only while the job is active (firestore.rules agrees).
+  bool get chatOpen => isActive;
 
   DateTime? timeOf(BookingStatus s) => statusAt[bookingStatusKey(s)];
 }

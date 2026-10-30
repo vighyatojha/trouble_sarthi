@@ -8,12 +8,13 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/job_api.dart';
+import '../../core/sarthi_ui.dart';
 import '../../core/job_media_widgets.dart';
 import '../../core/job_models.dart';
 import 'booking_tracker_screen.dart';
 
 const _purple = Color(0xFF7C3AED);
-const _ink = Color(0xFF111827);
+const _ink = SarthiColors.ink;
 const _muted = Color(0xFF6B7280);
 const _green = Color(0xFF059669);
 const _red = Color(0xFFDC2626);
@@ -150,19 +151,13 @@ class _RequestPitchesScreenState extends State<RequestPitchesScreen> {
   }
 
   Widget _scaffold(JobRequest? job, Widget body) => Scaffold(
-    backgroundColor: const Color(0xFFF7F7FB),
-    appBar: AppBar(
-      backgroundColor: Colors.white,
-      foregroundColor: _ink,
-      elevation: 0.5,
-      title: Text(job?.serviceName ?? 'Your request', style: const TextStyle(fontWeight: FontWeight.w700)),
+    backgroundColor: SarthiColors.page,
+    appBar: SarthiAppBar(
+      title: job?.serviceName ?? 'Your request',
+      subtitle: 'Compare quotes and choose a helper',
       actions: [
         if (job != null && job.status == JobStatus.open && !_accepting)
-          IconButton(
-            tooltip: 'Cancel request',
-            onPressed: _accepting ? null : () => _cancelRequest(job),
-            icon: const Icon(Icons.close_rounded),
-          ),
+          SarthiHeaderButton(icon: Icons.close_rounded, onTap: () => _cancelRequest(job)),
       ],
     ),
     body: Stack(children: [

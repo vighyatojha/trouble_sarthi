@@ -18,6 +18,7 @@ import 'package:trouble_sarthi/service/image_picker_service.dart';
 import 'ai_agent_constants.dart';
 import 'auth/login_screen.dart';
 import '../request/my_requests_screen.dart';
+import '../core/chat_unread.dart';
 import '../core/push_tokens.dart';
 import 'package:local_auth/local_auth.dart';
 
@@ -1873,6 +1874,7 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
     if (ok == true && mounted) {
       try {
         await PushTokens.instance.stop();
+        await ChatUnread.instance.stop();
         await FirebaseAuth.instance.signOut();
         if (mounted) {
           Navigator.of(context).pushAndRemoveUntil(
@@ -2024,6 +2026,8 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
         }, SetOptions(merge: true));
 
         await PushTokens.instance.stop();
+
+        await ChatUnread.instance.stop();
         await FirebaseAuth.instance.signOut();
         if (mounted) {
           Navigator.of(context).pushAndRemoveUntil(

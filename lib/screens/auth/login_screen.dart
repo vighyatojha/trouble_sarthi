@@ -110,18 +110,11 @@ class _LoginScreenState extends State<LoginScreen>
     }
   }
 
+  // User profiles are private (firestore.rules), so a username can no longer
+  // be looked up before sign-in. People who type an email here still get in.
   Future<String?> _resolveEmailFromUsername(String username) async {
-    try {
-      final snap = await FirebaseFirestore.instance
-          .collection('users')
-          .where('username', isEqualTo: username.toLowerCase().trim())
-          .limit(1)
-          .get();
-      if (snap.docs.isNotEmpty) {
-        return snap.docs.first.data()['email'] as String?;
-      }
-    } catch (_) {}
-    return null;
+    final v = username.trim();
+    return v.contains('@') ? v : null;
   }
 
   Future<void> _signIn() async {
@@ -149,7 +142,7 @@ class _LoginScreenState extends State<LoginScreen>
       if (_useUsername) {
         final resolved = await _resolveEmailFromUsername(identifier);
         if (resolved == null) {
-          setState(() => _identifierError = 'No account found with this username.');
+          setState(() => _identifierError = 'Please sign in with your email address.');
           return;
         }
         email = resolved;
@@ -159,8 +152,9 @@ class _LoginScreenState extends State<LoginScreen>
           .signInWithEmailAndPassword(email: email, password: password);
 
       if (credential.user != null && mounted) {
-        final isNew = credential.additionalUserInfo?.isNewUser ?? false;
-        final dest  = isNew ? const CompleteProfileScreen() : const HomeScreen();
+        final complete = await AuthService.instance.isProfileComplete(credential.user!.uid);
+        if (!mounted) return;
+        final dest  = complete ? const HomeScreen() : const CompleteProfileScreen();
         Navigator.pushAndRemoveUntil(
           context,
           PageRouteBuilder(

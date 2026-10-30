@@ -4,6 +4,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import '../core/booking_chat_screen.dart';
+
 // ─────────────────────────────────────────────────────────────────────────────
 // BACKGROUND HANDLER — must be top-level, outside any class
 // ─────────────────────────────────────────────────────────────────────────────
@@ -44,6 +46,22 @@ class NotificationService {
     enableLights: true,
   );
 
+  // Chat messages get their own channel so people can mute chats separately.
+  // The id must match the Worker ("trouble_sarthi_chat").
+  static const _chatChannel = AndroidNotificationChannel(
+    'trouble_sarthi_chat',
+    'Chat messages',
+    description: 'Messages from your helper',
+    importance: Importance.high,
+    playSound: true,
+    enableVibration: true,
+    ledColor: Color(0xFF7C3AED),
+    enableLights: true,
+  );
+
+  static const _brand = Color(0xFF7C3AED);
+  static const _smallIcon = 'ic_notification';
+
   Future<void> init() async {
     // 1. Request permission
     await _fcm.requestPermission(
@@ -63,7 +81,7 @@ class NotificationService {
     );
 
     // 4. Initialise flutter_local_notifications
-    const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const androidSettings = AndroidInitializationSettings(_smallIcon);
     const iosSettings = DarwinInitializationSettings(
       requestAlertPermission: false,
       requestBadgePermission: false,
@@ -79,9 +97,10 @@ class NotificationService {
 
     // 5. Create Android notification channel — KEY LINE (must be one line, no break inside <>)
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
-      await _localNotifications
-          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
-          ?.createNotificationChannel(_androidChannel);
+      final android = _localNotifications
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      await android?.createNotificationChannel(_androidChannel);
+      await android?.createNotificationChannel(_chatChannel);
     }
 
     // 6. Foreground FCM → show local banner
@@ -100,20 +119,44 @@ class NotificationService {
   Future<void> _showForegroundBanner(RemoteMessage message) async {
     final notification = message.notification;
     if (notification == null) return;
+    final data = message.data;
+    final isChat = data['type'] == 'chat_message';
+    final chatId = '${data['bookingId'] ?? ''}';
+
+    // Already looking at this chat: the message is on screen, no banner.
+    if (isChat && chatId.isNotEmpty && BookingChatScreen.openChatId == chatId) return;
+
+    final channel = isChat ? _chatChannel : _androidChannel;
+    final title = notification.title ?? 'Trouble Sarthi';
+    final body = notification.body ?? '';
 
     await _localNotifications.show(
-      notification.hashCode,
-      notification.title,
-      notification.body,
+      // Same id for the same chat / booking → the new banner replaces the old one.
+      (isChat ? 'chat_$chatId' : (data['bookingId'] ?? data['jobId'] ?? notification.hashCode)).hashCode,
+      title,
+      body,
       NotificationDetails(
         android: AndroidNotificationDetails(
-          _androidChannel.id,
-          _androidChannel.name,
-          channelDescription: _androidChannel.description,
-          importance: Importance.max,
+          channel.id,
+          channel.name,
+          channelDescription: channel.description,
+          importance: isChat ? Importance.high : Importance.max,
           priority: Priority.high,
-          icon: '@mipmap/ic_launcher',
-          color: const Color(0xFF7C3AED),
+          icon: _smallIcon,
+          color: _brand,
+          colorized: false,
+          category: isChat ? AndroidNotificationCategory.message : AndroidNotificationCategory.status,
+          groupKey: isChat ? 'trouble_sarthi_chats' : 'trouble_sarthi_updates',
+          styleInformation: isChat
+              ? MessagingStyleInformation(
+            const Person(name: 'You'),
+            conversationTitle: title,
+            groupConversation: false,
+            messages: [
+              Message(body, DateTime.now(), Person(name: '${data['senderName'] ?? title}')),
+            ],
+          )
+              : BigTextStyleInformation(body, contentTitle: title),
         ),
         iOS: const DarwinNotificationDetails(
           presentAlert: true,
@@ -121,22 +164,31 @@ class NotificationService {
           presentSound: true,
         ),
       ),
-      payload: message.data['bookingId'] as String?,
+      payload: _target(data),
     );
   }
 
+  /// Where a notification should take the user:
+  /// "chat:<bookingId>", "booking:<id>" or "job:<id>".
+  static String? _target(Map<String, dynamic> data) {
+    final bookingId = data['bookingId'];
+    if (data['type'] == 'chat_message' && bookingId is String && bookingId.isNotEmpty) return 'chat:$bookingId';
+    if (bookingId is String && bookingId.isNotEmpty) return 'booking:$bookingId';
+    final jobId = data['jobId'];
+    if (jobId is String && jobId.isNotEmpty) return 'job:$jobId';
+    return null;
+  }
+
   void _onNotificationTapped(NotificationResponse response) {
-    final bookingId = response.payload;
-    if (bookingId != null && bookingId.isNotEmpty) {
-      NotificationNavNotifier.instance.value = bookingId;
+    final target = response.payload;
+    if (target != null && target.isNotEmpty) {
+      NotificationNavNotifier.instance.value = target;
     }
   }
 
   void _handleNotificationTap(RemoteMessage message) {
-    final bookingId = message.data['bookingId'] as String?;
-    if (bookingId != null && bookingId.isNotEmpty) {
-      NotificationNavNotifier.instance.value = bookingId;
-    }
+    final target = _target(message.data);
+    if (target != null) NotificationNavNotifier.instance.value = target;
   }
 
   Future<String?> getDeviceToken() => _fcm.getToken();

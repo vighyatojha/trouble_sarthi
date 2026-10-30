@@ -20,14 +20,16 @@ import 'package:record/record.dart';
 import '../../core/app_config.dart';
 import '../../core/cloudinary.dart';
 import '../../core/job_api.dart';
+import '../../core/sarthi_ui.dart';
 import '../../core/job_media_widgets.dart';
 import '../../core/job_models.dart';
+import '../../core/review_sheet.dart';
 import '../../core/service_catalog.dart';
 import '../../service/firestore_service.dart';
 import 'request_pitches_screen.dart';
 
 const _purple = Color(0xFF7C3AED);
-const _ink = Color(0xFF111827);
+const _ink = SarthiColors.ink;
 const _muted = Color(0xFF6B7280);
 const _maxPhotos = AppConfig.maxPhotos;
 const _maxAudioSec = AppConfig.maxAudioSeconds;
@@ -398,6 +400,14 @@ class _DescribeProblemScreenState extends State<DescribeProblemScreen> {
       return;
     }
 
+    // Every booking ends with both sides rating each other: rate the last
+    // helper before asking for a new one.
+    if (!await ReviewSheet.requirePending(context, asCustomer: true)) {
+      if (mounted) setState(() => _error = 'Please rate your previous helper to post a new request.');
+      return;
+    }
+    if (!mounted) return;
+
     setState(() {
       _busy = true;
       _error = null;
@@ -463,27 +473,18 @@ class _DescribeProblemScreenState extends State<DescribeProblemScreen> {
     return PopScope(
       canPop: !_busy,
       child: Scaffold(
-        backgroundColor: const Color(0xFFF7F7FB),
-        appBar: AppBar(
-          backgroundColor: Colors.white,
-          foregroundColor: _ink,
-          elevation: 0.5,
-          titleSpacing: 0,
-          title: Row(children: [
+        backgroundColor: SarthiColors.page,
+        appBar: SarthiAppBar(
+          title: widget.subcategory.name(_lang),
+          subtitle: t('title'),
+          actions: [
             Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(color: c.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(10)),
-              child: Icon(widget.subcategory.icon, color: c, size: 20),
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.14), shape: BoxShape.circle),
+              child: Icon(widget.subcategory.icon, color: Colors.white, size: 18),
             ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(widget.subcategory.name(_lang),
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-                Text(t('title'), style: const TextStyle(fontSize: 12, color: _muted)),
-              ]),
-            ),
-          ]),
+          ],
         ),
         body: Stack(children: [
           ListView(

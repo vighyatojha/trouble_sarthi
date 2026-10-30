@@ -8,19 +8,19 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../core/booking_chat_scree.dart';
+import '../../core/booking_chat_screen.dart';
 import '../../core/job_api.dart';
+import '../../core/sarthi_ui.dart';
 import '../../core/job_media_widgets.dart';
 import '../../core/job_models.dart';
 import '../../core/review_sheet.dart';
 import 'request_pitches_screen.dart';
 
 const _purple = Color(0xFF7C3AED);
-const _ink = Color(0xFF111827);
+const _ink = SarthiColors.ink;
 const _muted = Color(0xFF6B7280);
 const _green = Color(0xFF059669);
 const _red = Color(0xFFDC2626);
-const _amber = Color(0xFFD97706);
 
 class BookingTrackerScreen extends StatefulWidget {
   final String bookingId;
@@ -154,6 +154,8 @@ class _BookingTrackerScreenState extends State<BookingTrackerScreen> {
 
   void _maybePromptReview(Booking b) {
     if (_reviewPrompted || b.status != BookingStatus.completed || b.customerReviewed) return;
+    final done = b.completedAt;
+    if (done != null && DateTime.now().isAfter(done.add(reviewWindow))) return;
     _reviewPrompted = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -168,12 +170,10 @@ class _BookingTrackerScreenState extends State<BookingTrackerScreen> {
       builder: (context, snap) {
         final b = snap.data;
         return Scaffold(
-          backgroundColor: const Color(0xFFF7F7FB),
-          appBar: AppBar(
-            backgroundColor: Colors.white,
-            foregroundColor: _ink,
-            elevation: 0.5,
-            title: Text(b?.serviceName ?? 'Booking', style: const TextStyle(fontWeight: FontWeight.w700)),
+          backgroundColor: SarthiColors.page,
+          appBar: SarthiAppBar(
+            title: b?.serviceName ?? 'Booking',
+            subtitle: b == null ? '' : '${bookingStatusLabel(b.status)} · ₹${b.agreedAmount}',
           ),
           body: snap.hasError
               ? const Center(child: Text('Could not load this booking.'))
@@ -205,7 +205,11 @@ class _BookingTrackerScreenState extends State<BookingTrackerScreen> {
               success: 'New code created'),
         ),
       if (b.status == BookingStatus.workDone) _paymentCard(b),
-      if (b.status == BookingStatus.completed) _completedCard(b),
+      if (b.status == BookingStatus.completed) ...[
+        _completedCard(b),
+        const SizedBox(height: 12),
+        MutualReviewCard(booking: b, asCustomer: true),
+      ],
       const SizedBox(height: 12),
       _DetailsCard(booking: b),
       const SizedBox(height: 16),
@@ -343,15 +347,6 @@ class _BookingTrackerScreenState extends State<BookingTrackerScreen> {
             '${b.customerPaidAt == null ? '' : ' · paid by ${b.paymentMethod == 'upi' ? 'UPI' : 'cash'}'}',
         style: const TextStyle(color: Color(0xFF047857)),
       ),
-      if (!b.customerReviewed) ...[
-        const SizedBox(height: 12),
-        FilledButton.icon(
-          style: FilledButton.styleFrom(backgroundColor: _amber),
-          onPressed: () => ReviewSheet.show(context, booking: b, asCustomer: true),
-          icon: const Icon(Icons.star_rounded),
-          label: Text('Rate ${b.helperName.split(' ').first}'),
-        ),
-      ],
     ]),
   );
 }

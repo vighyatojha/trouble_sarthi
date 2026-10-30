@@ -16,7 +16,11 @@ import 'location_picker_screen.dart';
 import 'midnight_emergency_screen.dart';
 import 'home_skeleton.dart'; // ← your skeleton file
 import '../service/notification_service.dart';
+import '../core/booking_chat_screen.dart';
+import '../core/chat_unread.dart';
+import '../core/job_api.dart';
 import '../core/push_tokens.dart';
+import '../core/review_sheet.dart';
 import '../core/service_catalog.dart';
 import '../request/describe_problem_screen.dart';
 import '../request/my_requests_screen.dart';
@@ -273,10 +277,25 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     // Save this phone's push token for the signed-in customer.
     PushTokens.instance.start(app: 'user');
+    // Keeps the Messages badge up to date with unread chats.
+    ChatUnread.instance.start();
     // Listen for notification taps → open the right booking / request.
     NotificationNavNotifier.instance.addListener(_onNotificationNav);
     // A tap that launched the app arrives before this screen exists.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _onNotificationNav());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _onNotificationNav();
+      _askPendingReview();
+    });
+  }
+
+  // Every booking ends with a mutual review: if a finished job is still
+  // unrated, ask once when the app opens.
+  Future<void> _askPendingReview() async {
+    await Future.delayed(const Duration(seconds: 2));
+    if (!mounted) return;
+    final pending = await JobApi.instance.pendingReviews(asHelper: false);
+    if (pending.isEmpty || !mounted) return;
+    await ReviewSheet.show(context, booking: pending.first, asCustomer: true);
   }
 
   // Called whenever a notification is tapped. Value is "booking:<id>" or "job:<id>".
@@ -285,6 +304,10 @@ class _HomeScreenState extends State<HomeScreen> {
     if (target == null || !mounted) return;
     NotificationNavNotifier.instance.value = null; // reset so it doesn't re-fire
 
+    if (target.startsWith('chat:')) {
+      BookingChatScreen.open(context, bookingId: target.substring(5), myRole: 'customer');
+      return;
+    }
     final Widget? page = target.startsWith('booking:')
         ? BookingTrackerScreen(bookingId: target.substring(8))
         : target.startsWith('job:')
@@ -1202,6 +1225,7 @@ class _ProfileAvatar extends StatelessWidget {
                 onTap: () async {
                   Navigator.pop(context);
                   await PushTokens.instance.stop();
+                  await ChatUnread.instance.stop();
                   await FirebaseAuth.instance.signOut();
                   if (context.mounted) {
                     Navigator.pushAndRemoveUntil(

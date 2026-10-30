@@ -1,18 +1,38 @@
-// ignore_for_file: use_build_context_synchronously
+// lib/screens/about_screen.dart
+//
+//  TRUST & SAFETY  (bottom-nav "Trust" tab, also opened from Profile)
+//  Everything here is read from the live booking system:
+//   • Trust score  — worked out on the phone from verification, completed
+//                    bookings, helpers' ratings (user_ratings/{uid}) and
+//                    cancellations. The breakdown is shown so it's never a mystery.
+//   • Verification — Firebase Auth + users/{uid}
+//   • Helper ratings for you — reviews where toUid == me
+//   • Reviews you gave       — reviews where fromUid == me
+//   • Reports you raised     — reports where reporterId == me
+//   • How Sarthi keeps you safe (start code, chat, pay after work, SOS …)
+
+import 'dart:math' as math;
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:intl/intl.dart';
 
-import '../service/realtime_db_service.dart';
+import '../core/job_api.dart';
+import '../core/job_models.dart';
+import '../core/ranking.dart';
+import '../core/review_sheet.dart';
+import '../core/sarthi_ui.dart';
+import '../request/booking_tracker_screen.dart';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  TRUST & SAFETY SCREEN  —  "Your Safety is Our Priority"
-//  - No auto-popup of review sheet on load
-//  - Smooth animations (no jank)
-//  - Shows: Trust Score, Helper Ratings to User, Verification, Report History
-//  - MutualReviewSheet kept here, called only on booking completion
-// ═══════════════════════════════════════════════════════════════════════════════
+const _navy = Color(0xFF0F2042);
+const _teal = Color(0xFF0D6E6E);
+const _trustGradient = LinearGradient(
+  begin: Alignment.topLeft,
+  end: Alignment.bottomRight,
+  colors: [Color(0xFF0F2042), Color(0xFF1A3A6B), Color(0xFF0D6E6E)],
+);
 
 class AboutScreen extends StatefulWidget {
   const AboutScreen({super.key});
@@ -21,150 +41,188 @@ class AboutScreen extends StatefulWidget {
   State<AboutScreen> createState() => _AboutScreenState();
 }
 
-class _AboutScreenState extends State<AboutScreen>
-    with SingleTickerProviderStateMixin {
-  // Single animation controller for staggered card entrance
-  // SingleTicker = much lighter than multiple controllers
-  late final AnimationController _stagger;
-  late final List<Animation<double>> _fades;
+class _AboutScreenState extends State<AboutScreen> {
+  final _db = FirebaseFirestore.instance;
+  String get _uid => FirebaseAuth.instance.currentUser?.uid ?? '';
 
-  @override
-  void initState() {
-    super.initState();
+  late final Stream<DocumentSnapshot<Map<String, dynamic>>> _profile =
+  _db.collection('users').doc(_uid.isEmpty ? '_' : _uid).snapshots();
+  late final Stream<DocumentSnapshot<Map<String, dynamic>>> _ratings =
+  _db.collection('user_ratings').doc(_uid.isEmpty ? '_' : _uid).snapshots();
+  late final Stream<List<Booking>> _bookings = JobApi.instance.myBookings(asHelper: false, limit: 100);
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _received = _db
+      .collection('reviews')
+      .where('toUid', isEqualTo: _uid)
+      .where('visible', isEqualTo: true) // mutual reviews stay hidden until both sides review
+      .orderBy('createdAt', descending: true)
+      .limit(20)
+      .snapshots();
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _given =
+  _db.collection('reviews').where('fromUid', isEqualTo: _uid).limit(30).snapshots();
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _reports =
+  _db.collection('reports').where('reporterId', isEqualTo: _uid).limit(20).snapshots();
 
-    // ─── NO auto-popup here. MutualReviewSheet.showForUser / showForHelper
-    // should be called from your booking-completion flow, NOT from initState.
+  bool _revealChecked = false;
 
-    _stagger = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    )..forward();
-
-    // Lightweight opacity-only stagger — avoids SlideTransition jank on scroll
-    _fades = List.generate(7, (i) {
-      final start = (i * 0.12).clamp(0.0, 0.8);
-      final end = (start + 0.35).clamp(0.0, 1.0);
-      return Tween<double>(begin: 0, end: 1).animate(
-        CurvedAnimation(
-          parent: _stagger,
-          curve: Interval(start, end, curve: Curves.easeOut),
-        ),
-      );
-    });
-  }
-
-  @override
-  void dispose() {
-    _stagger.dispose();
-    super.dispose();
+  /// Completed bookings where the helper rated me but I haven't rated them yet
+  /// (still inside the 14-day window). Also reveals overdue hidden reviews once.
+  List<Booking> _pendingMutual(List<Booking> all) {
+    final now = DateTime.now();
+    final completed = all.where((b) => b.status == BookingStatus.completed && b.completedAt != null).toList();
+    if (!_revealChecked && completed.isNotEmpty) {
+      _revealChecked = true;
+      final overdue = completed
+          .where((b) => b.customerReviewed != b.helperReviewed && now.isAfter(b.completedAt!.add(reviewWindow)))
+          .take(10);
+      for (final b in overdue) {
+        JobApi.instance.revealDueReviews(b);
+      }
+    }
+    return completed
+        .where((b) => b.helperReviewed && !b.customerReviewed && now.isBefore(b.completedAt!.add(reviewWindow)))
+        .toList();
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_uid.isEmpty) {
+      return const Scaffold(
+        backgroundColor: SarthiColors.page,
+        body: SarthiEmpty(icon: Icons.shield_outlined, title: 'Sign in to see your trust score'),
+      );
+    }
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle.light,
       child: Scaffold(
-        backgroundColor: const Color(0xFFF4F6FB),
+        backgroundColor: SarthiColors.page,
         body: CustomScrollView(
-          // RepaintBoundary-friendly physics
           physics: const ClampingScrollPhysics(),
           slivers: [
-            // ── Hero header ──────────────────────────────────────────
-            SliverToBoxAdapter(child: _TrustHero(stagger: _stagger)),
-
+            const SliverToBoxAdapter(child: _TrustHero()),
             SliverPadding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 0),
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 130),
               sliver: SliverList(
                 delegate: SliverChildListDelegate([
-                  const SizedBox(height: 24),
-
-                  // ── Trust Score Card ─────────────────────────────
-                  _FadeIn(
-                    animation: _fades[0],
-                    child: const _TrustScoreCard(),
-                  ),
-
-                  const SizedBox(height: 28),
-                  _sectionLabel('VERIFICATION STATUS'),
-                  const SizedBox(height: 12),
-
-                  // ── Verification chips ───────────────────────────
-                  _FadeIn(
-                    animation: _fades[1],
-                    child: const _VerificationRow(),
-                  ),
-
-                  const SizedBox(height: 28),
-                  _sectionLabel('HELPER RATINGS FOR YOU'),
-                  const SizedBox(height: 4),
-                  _FadeIn(
-                    animation: _fades[2],
-                    child: const _SectionSubtitle(
-                      'Ratings helpers have given you across bookings.',
+                  // Score + breakdown
+                  StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                    stream: _profile,
+                    builder: (context, p) => StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                      stream: _ratings,
+                      builder: (context, r) => StreamBuilder<List<Booking>>(
+                        stream: _bookings,
+                        builder: (context, b) {
+                          final score = _TrustInputs.from(
+                            user: FirebaseAuth.instance.currentUser,
+                            profile: p.data?.data() ?? const {},
+                            ratings: r.data?.data() ?? const {},
+                            bookings: b.data ?? const [],
+                          );
+                          final pending = _pendingMutual(b.data ?? const []);
+                          return Column(children: [
+                            _TrustScoreCard(t: score, loading: !p.hasData || !b.hasData),
+                            if (pending.isNotEmpty) ...[
+                              const SizedBox(height: 12),
+                              _PendingReviewsCard(bookings: pending),
+                            ],
+                            const SizedBox(height: 12),
+                            _StatsRow(t: score),
+                            const SarthiSectionLabel('Verification'),
+                            _VerificationCard(t: score),
+                            const SarthiSectionLabel('How your score is made'),
+                            _BreakdownCard(t: score),
+                          ]);
+                        },
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 12),
 
-                  // ── Helper-to-User ratings feed ──────────────────
-                  // ── Helper-to-User ratings feed ──────────────────
-                  _FadeIn(
-                    animation: _fades[3],
-                    child: const _HelperRatingsFeed(),
+                  // Helper ratings for you
+                  const SarthiSectionLabel('What helpers said about you'),
+                  StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                    stream: _received,
+                    builder: (context, snap) {
+                      if (snap.hasError) return const _InfoCard(text: 'Could not load ratings right now.');
+                      if (!snap.hasData) return const _LoadingCard();
+                      final docs = snap.data!.docs;
+                      if (docs.isEmpty) {
+                        return const _InfoCard(
+                          icon: Icons.star_outline_rounded,
+                          text: 'No ratings yet. After a completed job, your helper can rate you. '
+                              'Being clear, respectful and paying on time earns good ratings.',
+                        );
+                      }
+                      return Column(children: [for (final d in docs) _ReviewCard(data: d.data(), received: true)]);
+                    },
                   ),
 
-                  const SizedBox(height: 28),
-                  _sectionLabel('REVIEW HISTORY'),
-                  const SizedBox(height: 4),
-                  _FadeIn(
-                    animation: _fades[2],
-                    child: const _SectionSubtitle(
-                      'Reviews you gave helpers and reviews helpers gave you.',
-                    ),
+                  // Reviews you gave
+                  const SarthiSectionLabel('Reviews you gave'),
+                  StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                    stream: _given,
+                    builder: (context, snap) {
+                      if (snap.hasError) return const _InfoCard(text: 'Could not load your reviews right now.');
+                      if (!snap.hasData) return const _LoadingCard();
+                      final docs = [...snap.data!.docs]..sort((a, b) {
+                        final at = a.data()['createdAt'], bt = b.data()['createdAt'];
+                        if (at is! Timestamp) return 1;
+                        if (bt is! Timestamp) return -1;
+                        return bt.compareTo(at);
+                      });
+                      if (docs.isEmpty) {
+                        return const _InfoCard(
+                          icon: Icons.rate_review_outlined,
+                          text: 'You haven\'t reviewed a helper yet. Your reviews decide which helpers '
+                              'appear first for everyone nearby.',
+                        );
+                      }
+                      return SizedBox(
+                        height: 150,
+                        child: ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          itemCount: docs.length,
+                          separatorBuilder: (_, __) => const SizedBox(width: 10),
+                          itemBuilder: (_, i) => _GivenReviewTile(data: docs[i].data()),
+                        ),
+                      );
+                    },
                   ),
-                  const SizedBox(height: 12),
-                  _FadeIn(
-                    animation: _fades[6],
-                    child: const _ReviewHistoryBentoGrid(),
+
+                  // Reports
+                  const SarthiSectionLabel('Problems you reported'),
+                  StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                    stream: _reports,
+                    builder: (context, snap) {
+                      if (snap.hasError) return const _InfoCard(text: 'Could not load reports right now.');
+                      if (!snap.hasData) return const _LoadingCard();
+                      final docs = [...snap.data!.docs]..sort((a, b) {
+                        final at = a.data()['createdAt'], bt = b.data()['createdAt'];
+                        if (at is! Timestamp) return 1;
+                        if (bt is! Timestamp) return -1;
+                        return bt.compareTo(at);
+                      });
+                      if (docs.isEmpty) {
+                        return const _InfoCard(
+                          icon: Icons.verified_user_outlined,
+                          text: 'No reports. If anything goes wrong during a booking, open the booking and tap '
+                              '"Report a problem". Our team reviews every report.',
+                        );
+                      }
+                      return Column(children: [for (final d in docs) _ReportCard(data: d.data())]);
+                    },
                   ),
 
-                  const SizedBox(height: 28),
-                  _sectionLabel('REPORT HISTORY'),
-                  const SizedBox(height: 12),
+                  const SarthiSectionLabel('How Sarthi keeps you safe'),
+                  const _SafetyFeatures(),
 
-                  // ── Report history ───────────────────────────────
-                  _FadeIn(
-                    animation: _fades[4],
-                    child: const _ReportHistorySection(),
-                  ),
-
-                  const SizedBox(height: 28),
-
-                  // ── Learn More CTA ───────────────────────────────
-                  _FadeIn(
-                    animation: _fades[5],
-                    child: const _LearnMoreButton(),
-                  ),
-
-                  // ── Demo Banner ──────────────────────────────────
-
-
-                  const SizedBox(height: 32),
-                  // Privacy note
+                  const SizedBox(height: 20),
                   const Center(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.lock_rounded, size: 12, color: Color(0xFFB0B8CC)),
-                        SizedBox(width: 5),
-                        Text(
-                          'Your data is end-to-end encrypted',
-                          style: TextStyle(fontSize: 11, color: Color(0xFFB0B8CC)),
-                        ),
-                      ],
-                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.lock_rounded, size: 12, color: Color(0xFFB0B8CC)),
+                      SizedBox(width: 5),
+                      Text('Your phone number and address are shared only with your booked helper.',
+                          style: TextStyle(fontSize: 11, color: Color(0xFFB0B8CC))),
+                    ]),
                   ),
-
-                  const SizedBox(height: 100),
                 ]),
               ),
             ),
@@ -173,1058 +231,195 @@ class _AboutScreenState extends State<AboutScreen>
       ),
     );
   }
-
-  Widget _sectionLabel(String text) => Text(
-    text,
-    style: const TextStyle(
-      fontSize: 10,
-      fontWeight: FontWeight.bold,
-      color: Color(0xFF9CA3AF),
-      letterSpacing: 1.4,
-    ),
-  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Lightweight fade-only wrapper (no translate = no jank)
+// TRUST SCORE (worked out on the phone; every part is shown in the breakdown)
 // ─────────────────────────────────────────────────────────────────────────────
-class _FadeIn extends StatelessWidget {
-  final Animation<double> animation;
-  final Widget child;
-  const _FadeIn({required this.animation, required this.child});
 
-  @override
-  Widget build(BuildContext context) =>
-      FadeTransition(opacity: animation, child: child);
-}
+class _TrustInputs {
+  final bool emailVerified, phoneAdded, photoAdded, profileComplete;
+  final int completed, cancelledByMe, active;
+  final double rating; // raw average from helpers
+  final int ratingCount;
 
-class _SectionSubtitle extends StatelessWidget {
-  final String text;
-  const _SectionSubtitle(this.text);
-  @override
-  Widget build(BuildContext context) => Text(
-    text,
-    style: const TextStyle(fontSize: 12, color: Color(0xFF9CA3AF), height: 1.4),
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// HERO SECTION  (simplified — pulsing animation removed to cut repaints)
-// ─────────────────────────────────────────────────────────────────────────────
-class _TrustHero extends StatelessWidget {
-  final AnimationController stagger;
-  const _TrustHero({required this.stagger});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFF0F2042), Color(0xFF1A3A6B), Color(0xFF0D6E6E)],
-        ),
-      ),
-      child: SafeArea(
-        bottom: false,
-        child: Column(
-          children: [
-            // Nav row
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
-              child: Row(
-                children: [
-                  // Back button
-                  GestureDetector(
-                    onTap: () => Navigator.maybePop(context),
-                    child: Container(
-                      width: 36,
-                      height: 36,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.12),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: const Icon(Icons.arrow_back_rounded,
-                          color: Colors.white, size: 18),
-                    ),
-                  ),
-                  const SizedBox(width: 14),
-                  const Text(
-                    'Trust & Safety',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                    ),
-                  ),
-                  const Spacer(),
-                  // Shield icon button
-                  Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: const Icon(Icons.shield_rounded,
-                        color: Colors.white, size: 18),
-                  ),
-                ],
-              ),
-            ),
-
-            const SizedBox(height: 28),
-
-            // Static shield (no pulsing = no repaint every frame)
-            Stack(
-              alignment: Alignment.center,
-              children: [
-                Container(
-                  width: 100,
-                  height: 100,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: const Color(0xFF0D9488).withOpacity(0.18),
-                  ),
-                ),
-                Container(
-                  width: 78,
-                  height: 78,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: LinearGradient(
-                      colors: [
-                        Colors.white.withOpacity(0.22),
-                        Colors.white.withOpacity(0.08),
-                      ],
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                    ),
-                    border: Border.all(
-                        color: Colors.white.withOpacity(0.28), width: 1.5),
-                  ),
-                  child: const Icon(Icons.shield_rounded,
-                      size: 38, color: Colors.white),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 18),
-
-            const Text(
-              'Your Safety is\nOur Priority',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 24,
-                fontWeight: FontWeight.bold,
-                color: Colors.white,
-                height: 1.25,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 40),
-              child: Text(
-                'Verified helpers · Secure chats · Mutual reviews',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Colors.white.withOpacity(0.65),
-                  height: 1.5,
-                ),
-              ),
-            ),
-
-            const SizedBox(height: 26),
-
-            // Curved bottom edge
-            Container(
-              height: 26,
-              decoration: const BoxDecoration(
-                color: Color(0xFFF4F6FB),
-                borderRadius: BorderRadius.only(
-                  topLeft: Radius.circular(28),
-                  topRight: Radius.circular(28),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// TRUST SCORE CARD  (like reference image — big star + score + badge)
-// ─────────────────────────────────────────────────────────────────────────────
-class _TrustScoreCard extends StatelessWidget {
-  const _TrustScoreCard();
-
-  @override
-  Widget build(BuildContext context) {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-
-    return StreamBuilder<DocumentSnapshot>(
-      stream: uid != null
-          ? FirebaseFirestore.instance.collection('users').doc(uid).snapshots()
-          : null,
-      builder: (context, snap) {
-        final data = snap.data?.data() as Map<String, dynamic>?;
-        final avgRating =
-            (data?['avgRating'] as num?)?.toDouble() ?? 0.0;
-        final reviewCount = (data?['reviewCount'] as int?) ?? 0;
-
-        // Determine badge label
-        String badge = 'New Member';
-        if (avgRating >= 4.8) badge = 'Top 5% of Users';
-        else if (avgRating >= 4.5) badge = 'Top 15% of Users';
-        else if (avgRating >= 4.0) badge = 'Trusted User';
-        else if (avgRating >= 3.0) badge = 'Good Standing';
-
-        final displayScore = reviewCount == 0
-            ? '—'
-            : avgRating.toStringAsFixed(1);
-
-        return Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 24),
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              colors: [Color(0xFF3B1F8C), Color(0xFF1A3A6B), Color(0xFF0D6E6E)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-            borderRadius: BorderRadius.circular(22),
-            boxShadow: [
-              BoxShadow(
-                color: const Color(0xFF0D6E6E).withOpacity(0.28),
-                blurRadius: 20,
-                offset: const Offset(0, 8),
-              ),
-            ],
-          ),
-          child: Column(
-            children: [
-              const Text(
-                'YOUR TRUST SCORE',
-                style: TextStyle(
-                  fontSize: 10,
-                  fontWeight: FontWeight.bold,
-                  color: Color(0xFFB2E8E8),
-                  letterSpacing: 1.6,
-                ),
-              ),
-              const SizedBox(height: 14),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  const Icon(Icons.star_rounded,
-                      color: Color(0xFFFBBF24), size: 42),
-                  const SizedBox(width: 8),
-                  Text(
-                    displayScore,
-                    style: const TextStyle(
-                      fontSize: 48,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                      height: 1.0,
-                    ),
-                  ),
-                  const Padding(
-                    padding: EdgeInsets.only(bottom: 8),
-                    child: Text(
-                      '/5',
-                      style: TextStyle(
-                        fontSize: 18,
-                        color: Color(0xFFB2E8E8),
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 14),
-              Container(
-                padding:
-                const EdgeInsets.symmetric(horizontal: 18, vertical: 7),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.15),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: Colors.white.withOpacity(0.20)),
-                ),
-                child: Text(
-                  reviewCount == 0 ? 'No ratings yet' : badge,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                  ),
-                ),
-              ),
-              if (reviewCount > 0) ...[
-                const SizedBox(height: 10),
-                Text(
-                  'Based on $reviewCount helper rating${reviewCount == 1 ? '' : 's'}',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Colors.white.withOpacity(0.55),
-                  ),
-                ),
-              ],
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// VERIFICATION ROW  (Mobile Verified, Email Verified, KYC Done)
-// ─────────────────────────────────────────────────────────────────────────────
-class _VerificationRow extends StatelessWidget {
-  const _VerificationRow();
-
-  @override
-  Widget build(BuildContext context) {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-    final user = FirebaseAuth.instance.currentUser;
-
-    // Use Firebase Auth for email/phone verification state
-    final emailVerified = user?.emailVerified ?? false;
-    final phoneVerified = user?.phoneNumber != null;
-
-    return StreamBuilder<DocumentSnapshot>(
-      stream: uid != null
-          ? FirebaseFirestore.instance.collection('users').doc(uid).snapshots()
-          : null,
-      builder: (context, snap) {
-        final data = snap.data?.data() as Map<String, dynamic>?;
-        final kycDone = (data?['kycDone'] as bool?) ?? false;
-
-        return Container(
-          padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 12),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(18),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.04),
-                blurRadius: 10,
-                offset: const Offset(0, 3),
-              ),
-            ],
-          ),
-          child: Row(
-            children: [
-              _VerifChip(
-                icon: Icons.phone_android_rounded,
-                label: 'Mobile\nVerified',
-                done: phoneVerified,
-              ),
-              _VerifChip(
-                icon: Icons.email_rounded,
-                label: 'Email\nVerified',
-                done: emailVerified,
-              ),
-              _VerifChip(
-                icon: Icons.fingerprint_rounded,
-                label: 'KYC\nDone',
-                done: kycDone,
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _VerifChip extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool done;
-  const _VerifChip(
-      {required this.icon, required this.label, required this.done});
-
-  @override
-  Widget build(BuildContext context) {
-    const accent = Color(0xFF5B21B6);
-    return Expanded(
-      child: Column(
-        children: [
-          Container(
-            width: 52,
-            height: 52,
-            decoration: BoxDecoration(
-              color: done
-                  ? const Color(0xFFEDE9FE)
-                  : const Color(0xFFF3F4F6),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(icon,
-                color: done ? accent : const Color(0xFFD1D5DB), size: 24),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            label,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-              color: Color(0xFF374151),
-              height: 1.4,
-            ),
-          ),
-          const SizedBox(height: 5),
-          Icon(
-            done ? Icons.check_circle_rounded : Icons.cancel_rounded,
-            size: 16,
-            color: done ? const Color(0xFF22C55E) : const Color(0xFFD1D5DB),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// HELPER RATINGS FEED  (ratings helpers gave to THIS user)
-// ─────────────────────────────────────────────────────────────────────────────
-class _HelperRatingsFeed extends StatelessWidget {
-  const _HelperRatingsFeed();
-
-  @override
-  Widget build(BuildContext context) {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid == null) return const _EmptyRatings();
-
-    return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collectionGroup('helper_to_user')
-          .where('revieweeId', isEqualTo: uid)
-          .orderBy('createdAt', descending: true)
-          .limit(10)
-          .snapshots(),
-      builder: (context, snap) {
-        if (snap.connectionState == ConnectionState.waiting && !snap.hasData) {
-          return const _SimpleShimmer(height: 90, count: 2);
-        }
-
-        // FIXED: removed manual ..sort() — Firestore orderBy handles this now
-        final docs = snap.data?.docs ?? [];
-        if (docs.isEmpty) return const _EmptyRatings();
-
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  '${docs.length} rating${docs.length == 1 ? '' : 's'} received',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF6B7280),
-                  ),
-                ),
-                if (docs.length >= 5)
-                  GestureDetector(
-                    onTap: () {},
-                    child: const Text(
-                      'View All',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: Color(0xFF5B21B6),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            ...docs.map((doc) {
-              final data = doc.data() as Map<String, dynamic>;
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: _HelperRatingCard(data: data),
-              );
-            }),
-          ],
-        );
-      },
-    );
-  }
-}
-
-class _HelperRatingCard extends StatelessWidget {
-  final Map<String, dynamic> data;
-  const _HelperRatingCard({required this.data});
-
-  @override
-  Widget build(BuildContext context) {
-    final helperName = data['reviewerName'] as String? ??
-        data['revieweeName'] as String? ??
-        'Helper';
-    final stars = (data['starRating'] as int?) ?? 0;
-    final service = data['serviceName'] as String? ?? '';
-    final answers = data['answers'] as Map<String, dynamic>? ?? {};
-    final ts = data['createdAt'] as Timestamp?;
-
-    // Pick first answer as the "comment" to display
-    final comment = answers.values.isNotEmpty
-        ? answers.values.first.toString()
-        : null;
-
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.04),
-            blurRadius: 10,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Avatar
-          Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              color: const Color(0xFFEDE9FE),
-              shape: BoxShape.circle,
-            ),
-            child: Center(
-              child: Text(
-                helperName.isNotEmpty ? helperName[0].toUpperCase() : 'H',
-                style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  color: Color(0xFF5B21B6),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        helperName,
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF1F2937),
-                        ),
-                      ),
-                    ),
-                    // Star rating
-                    Row(
-                      children: [
-                        Text(
-                          '$stars.0',
-                          style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.bold,
-                            color: Color(0xFFF59E0B),
-                          ),
-                        ),
-                        const SizedBox(width: 3),
-                        const Icon(Icons.star_rounded,
-                            color: Color(0xFFF59E0B), size: 16),
-                      ],
-                    ),
-                  ],
-                ),
-                if (service.isNotEmpty) ...[
-                  const SizedBox(height: 3),
-                  Text(
-                    service,
-                    style: const TextStyle(
-                        fontSize: 11, color: Color(0xFF9CA3AF)),
-                  ),
-                ],
-                if (comment != null) ...[
-                  const SizedBox(height: 7),
-                  Text(
-                    '"$comment"',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: Color(0xFF374151),
-                      fontStyle: FontStyle.italic,
-                      height: 1.4,
-                    ),
-                  ),
-                ],
-                if (ts != null) ...[
-                  const SizedBox(height: 6),
-                  Text(
-                    _relTime(ts.toDate()),
-                    style: const TextStyle(
-                        fontSize: 10, color: Color(0xFFB0B8CC)),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  String _relTime(DateTime dt) {
-    final diff = DateTime.now().difference(dt);
-    if (diff.inMinutes < 1) return 'Just now';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
-    if (diff.inHours < 24) return '${diff.inHours}h ago';
-    if (diff.inDays == 1) return 'Yesterday, ${_time(dt)}';
-    if (diff.inDays < 30) return '${diff.inDays}d ago';
-    return '${dt.day}/${dt.month}/${dt.year}';
-  }
-
-  String _time(DateTime dt) {
-    final h = dt.hour > 12 ? dt.hour - 12 : dt.hour;
-    final m = dt.minute.toString().padLeft(2, '0');
-    final ampm = dt.hour >= 12 ? 'PM' : 'AM';
-    return '$h:$m $ampm';
-  }
-}
-
-class _EmptyRatings extends StatelessWidget {
-  const _EmptyRatings();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: const Color(0xFFF0F0F5)),
-      ),
-      child: Column(
-        children: [
-          Container(
-            width: 56,
-            height: 56,
-            decoration: const BoxDecoration(
-              color: Color(0xFFEDE9FE),
-              shape: BoxShape.circle,
-            ),
-            child: const Icon(Icons.star_outline_rounded,
-                size: 26, color: Color(0xFF5B21B6)),
-          ),
-          const SizedBox(height: 12),
-          const Text(
-            'No helper ratings yet',
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.bold,
-              color: Color(0xFF1F2937),
-            ),
-          ),
-          const SizedBox(height: 5),
-          const Text(
-            'Ratings from helpers will appear here\nafter completed bookings.',
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 12,
-              color: Color(0xFF9CA3AF),
-              height: 1.5,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// REPORT HISTORY SECTION
-// ─────────────────────────────────────────────────────────────────────────────
-class _ReportHistorySection extends StatelessWidget {
-  const _ReportHistorySection();
-
-  @override
-  Widget build(BuildContext context) {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid == null) return const SizedBox.shrink();
-
-    return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('reports')
-          .where('reporterId', isEqualTo: uid)
-          .limit(5)
-          .snapshots(),
-      builder: (context, snap) {
-        if (snap.connectionState == ConnectionState.waiting) {
-          return const _SimpleShimmer(height: 70, count: 2);
-        }
-
-        final docs = (snap.data?.docs ?? [])
-          ..sort((a, b) {
-            final aTs = (a.data() as Map<String, dynamic>)['createdAt'] as Timestamp?;
-            final bTs = (b.data() as Map<String, dynamic>)['createdAt'] as Timestamp?;
-            if (aTs == null && bTs == null) return 0;
-            if (aTs == null) return 1;
-            if (bTs == null) return -1;
-            return bTs.compareTo(aTs);
-          });
-
-        if (docs.isEmpty) {
-          return Container(
-            padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 20),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: const Color(0xFFF0F0F5)),
-            ),
-            child: const Row(
-              children: [
-                Icon(Icons.check_circle_rounded,
-                    color: Color(0xFF22C55E), size: 22),
-                SizedBox(width: 12),
-                Text(
-                  'No reports raised — clean record!',
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF374151),
-                  ),
-                ),
-              ],
-            ),
-          );
-        }
-
-        return Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(18),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.04),
-                blurRadius: 10,
-                offset: const Offset(0, 3),
-              ),
-            ],
-          ),
-          child: Column(
-            children: docs.asMap().entries.map((e) {
-              final data = e.value.data() as Map<String, dynamic>;
-              final title = data['title'] as String? ?? 'Report';
-              final ts = data['createdAt'] as Timestamp?;
-              final status =
-              (data['status'] as String? ?? 'pending').toLowerCase();
-              final isLast = e.key == docs.length - 1;
-
-              return Container(
-                padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-                decoration: BoxDecoration(
-                  border: isLast
-                      ? null
-                      : const Border(
-                      bottom: BorderSide(color: Color(0xFFF3F4F6))),
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            title,
-                            style: const TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                              color: Color(0xFF1F2937),
-                            ),
-                          ),
-                          if (ts != null)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 3),
-                              child: Text(
-                                'Raised on ${_fmtDate(ts.toDate())}',
-                                style: const TextStyle(
-                                    fontSize: 11, color: Color(0xFF9CA3AF)),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                    _StatusBadge(status: status),
-                  ],
-                ),
-              );
-            }).toList(),
-          ),
-        );
-      },
-    );
-  }
-
-  String _fmtDate(DateTime dt) {
-    const months = [
-      'Jan','Feb','Mar','Apr','May','Jun',
-      'Jul','Aug','Sep','Oct','Nov','Dec'
-    ];
-    return '${months[dt.month - 1]} ${dt.day}, ${dt.year}';
-  }
-}
-
-class _StatusBadge extends StatelessWidget {
-  final String status;
-  const _StatusBadge({required this.status});
-
-  @override
-  Widget build(BuildContext context) {
-    Color bg, fg;
-    String label;
-    switch (status) {
-      case 'resolved':
-        bg = const Color(0xFFD1FAE5);
-        fg = const Color(0xFF065F46);
-        label = 'RESOLVED';
-        break;
-      case 'under_review':
-      case 'under review':
-        bg = const Color(0xFFE0E7FF);
-        fg = const Color(0xFF3730A3);
-        label = 'UNDER\nREVIEW';
-        break;
-      default:
-        bg = const Color(0xFFFEF3C7);
-        fg = const Color(0xFF92400E);
-        label = 'PENDING';
-    }
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Text(
-        label,
-        textAlign: TextAlign.center,
-        style: TextStyle(
-          fontSize: 9,
-          fontWeight: FontWeight.bold,
-          color: fg,
-          letterSpacing: 0.4,
-          height: 1.3,
-        ),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// DEMO BANNER  — shows two buttons to trigger MutualReviewSheet in demo mode
-// Remove this widget (and its _FadeIn above) before production release.
-// ─────────────────────────────────────────────────────────────────────────────
-class _DemoBanner extends StatelessWidget {
-  final VoidCallback onDemoAsUser;
-  final VoidCallback onDemoAsHelper;
-  const _DemoBanner({required this.onDemoAsUser, required this.onDemoAsHelper});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: const Color(0xFFE9D8FD), width: 1.5),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF7C3AED).withOpacity(0.08),
-            blurRadius: 16,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // ── Header ────────────────────────────────────────────────
-          Container(
-            padding: const EdgeInsets.fromLTRB(18, 14, 18, 14),
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                colors: [Color(0xFF3B1F8C), Color(0xFF5B21B6), Color(0xFF7C3AED)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              borderRadius: BorderRadius.only(
-                topLeft: Radius.circular(20),
-                topRight: Radius.circular(20),
-              ),
-            ),
-            child: Row(children: [
-              Container(
-                width: 36, height: 36,
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.18),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: const Icon(Icons.play_circle_rounded,
-                    color: Colors.white, size: 20),
-              ),
-              const SizedBox(width: 12),
-              const Expanded(
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text('🎯  Try the Mutual Review Feature',
-                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold,
-                          color: Colors.white)),
-                  SizedBox(height: 2),
-                  Text('Pre-filled demo — tap to experience the full flow',
-                      style: TextStyle(fontSize: 11, color: Colors.white70)),
-                ]),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.22),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: const Text('DEMO',
-                    style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold,
-                        color: Colors.white, letterSpacing: 1)),
-              ),
-            ]),
-          ),
-
-          // ── Description ───────────────────────────────────────────
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 16, 18, 4),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('After every booking, both parties review each other.',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                      color: Color(0xFF1F2937))),
-              const SizedBox(height: 6),
-              const Text(
-                'This builds a trust ecosystem — helpers rate users, users rate helpers. '
-                    'Bad actors get flagged automatically. Tap a role below to see the full sheet.',
-                style: TextStyle(fontSize: 12, color: Color(0xFF6B7280), height: 1.5),
-              ),
-              const SizedBox(height: 14),
-
-              // ── Flow steps ─────────────────────────────────────
-              _FlowStep(
-                number: '1',
-                color: const Color(0xFF7C3AED),
-                title: 'Questionnaire',
-                sub: '6 quick questions about the experience',
-              ),
-              _FlowStep(
-                number: '2',
-                color: const Color(0xFF0891B2),
-                title: 'Star Rating',
-                sub: 'Overall 1–5 star rating for the person',
-              ),
-              _FlowStep(
-                number: '3',
-                color: const Color(0xFF059669),
-                title: 'Submit & Update',
-                sub: 'Score saved, avg rating recalculated live',
-                isLast: true,
-              ),
-            ]),
-          ),
-
-          // ── Divider ───────────────────────────────────────────────
-          const Divider(height: 1, color: Color(0xFFF0EBF9), indent: 18, endIndent: 18),
-
-          // ── Two buttons ───────────────────────────────────────────
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-            child: Column(children: [
-              const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                Icon(Icons.info_outline_rounded, size: 12, color: Color(0xFF9CA3AF)),
-                SizedBox(width: 5),
-                Text('All answers are pre-filled — just tap through',
-                    style: TextStyle(fontSize: 10, color: Color(0xFF9CA3AF))),
-              ]),
-              const SizedBox(height: 10),
-              Row(children: [
-                // User → rates Helper
-                Expanded(
-                  child: _DemoButton(
-                    icon: Icons.person_rounded,
-                    label: 'As User',
-                    sub: 'Rating a Helper',
-                    color: const Color(0xFF7C3AED),
-                    bgColor: const Color(0xFFEDE9FE),
-                    onTap: onDemoAsUser,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                // Helper → rates User
-                Expanded(
-                  child: _DemoButton(
-                    icon: Icons.engineering_rounded,
-                    label: 'As Helper',
-                    sub: 'Rating a Customer',
-                    color: const Color(0xFF0D9488),
-                    bgColor: const Color(0xFFCCFBF1),
-                    onTap: onDemoAsHelper,
-                  ),
-                ),
-              ]),
-            ]),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _FlowStep extends StatelessWidget {
-  final String number, title, sub;
-  final Color color;
-  final bool isLast;
-  const _FlowStep({
-    required this.number, required this.title,
-    required this.sub, required this.color, this.isLast = false,
+  const _TrustInputs({
+    required this.emailVerified,
+    required this.phoneAdded,
+    required this.photoAdded,
+    required this.profileComplete,
+    required this.completed,
+    required this.cancelledByMe,
+    required this.active,
+    required this.rating,
+    required this.ratingCount,
   });
 
+  factory _TrustInputs.from({
+    required User? user,
+    required Map<String, dynamic> profile,
+    required Map<String, dynamic> ratings,
+    required List<Booking> bookings,
+  }) {
+    String str(String k) => '${profile[k] ?? ''}'.trim();
+    final phone = str('phone').isNotEmpty || (user?.phoneNumber ?? '').isNotEmpty;
+    final photo = str('photoUrl').isNotEmpty || (user?.photoURL ?? '').isNotEmpty;
+    final name = str('name').isNotEmpty || (user?.displayName ?? '').isNotEmpty;
+    return _TrustInputs(
+      emailVerified: user?.emailVerified ?? false,
+      phoneAdded: phone,
+      photoAdded: photo,
+      profileComplete: profile['profileComplete'] == true || (name && phone),
+      completed: bookings.where((b) => b.status == BookingStatus.completed).length,
+      cancelledByMe:
+      bookings.where((b) => b.status == BookingStatus.cancelled && b.cancelledBy == 'customer').length,
+      active: bookings.where((b) => b.isActive).length,
+      rating: (ratings['rating'] as num?)?.toDouble() ?? 0,
+      ratingCount: (ratings['ratingCount'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  // Parts of the score (max 100).
+  int get verificationPts =>
+      (emailVerified ? 8 : 0) + (phoneAdded ? 8 : 0) + (photoAdded ? 4 : 0) + (profileComplete ? 5 : 0); // 25
+  int get bookingPts => (math.min(completed, 10) * 1.5).round(); // 15
+  int get ratingPts => ratingCount == 0
+      ? 10 // neutral until helpers rate you
+      : math.max(0, math.min(20, (((bayesRating(rating, ratingCount) - 1) / 4) * 20).round())); // 20
+  int get cancelPts => -math.min(cancelledByMe * 4, 20);
+  static const basePts = 40;
+
+  int get score => math.max(0, math.min(100, basePts + verificationPts + bookingPts + ratingPts + cancelPts));
+
+  String get label => score >= 85
+      ? 'Excellent'
+      : score >= 70
+      ? 'Trusted customer'
+      : score >= 50
+      ? 'Good standing'
+      : 'Needs attention';
+
+  Color get color => score >= 85
+      ? const Color(0xFF34D399)
+      : score >= 70
+      ? const Color(0xFF5EEAD4)
+      : score >= 50
+      ? const Color(0xFFFBBF24)
+      : const Color(0xFFF87171);
+}
+
+class _TrustHero extends StatelessWidget {
+  const _TrustHero();
+
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Column(children: [
-          Container(
-            width: 24, height: 24,
-            decoration: BoxDecoration(color: color.withOpacity(0.12),
-                shape: BoxShape.circle),
-            child: Center(child: Text(number,
-                style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: color))),
+    final canPop = Navigator.of(context).canPop();
+    return Container(
+      decoration: const BoxDecoration(gradient: _trustGradient),
+      child: SafeArea(
+        bottom: false,
+        child: Column(children: [
+          Padding(
+            padding: EdgeInsets.fromLTRB(canPop ? 8 : 20, 10, 20, 0),
+            child: Row(children: [
+              if (canPop)
+                IconButton(
+                  onPressed: () => Navigator.maybePop(context),
+                  icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 18),
+                ),
+              const Text('Trust & Safety',
+                  style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold, color: Colors.white)),
+              const Spacer(),
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.12), shape: BoxShape.circle),
+                child: const Icon(Icons.shield_rounded, color: Colors.white, size: 18),
+              ),
+            ]),
           ),
-          if (!isLast)
-            Container(width: 1.5, height: 16,
-                color: color.withOpacity(0.20),
-                margin: const EdgeInsets.symmetric(vertical: 2)),
+          const SizedBox(height: 14),
+          Text('Verified helpers · Start code · Pay after work',
+              style: TextStyle(fontSize: 12, color: Colors.white.withValues(alpha: 0.7))),
+          Container(
+            height: 24,
+            margin: const EdgeInsets.only(top: 16),
+            decoration: const BoxDecoration(
+              color: SarthiColors.page,
+              borderRadius: BorderRadius.only(topLeft: Radius.circular(26), topRight: Radius.circular(26)),
+            ),
+          ),
         ]),
-        const SizedBox(width: 10),
-        Padding(
-          padding: const EdgeInsets.only(top: 2),
+      ),
+    );
+  }
+}
+
+class _TrustScoreCard extends StatelessWidget {
+  final _TrustInputs t;
+  final bool loading;
+  const _TrustScoreCard({required this.t, required this.loading});
+
+  @override
+  Widget build(BuildContext context) {
+    final score = t.score;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(20, 20, 20, 18),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF3B1F8C), Color(0xFF1A3A6B), _teal],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: [BoxShadow(color: _teal.withValues(alpha: 0.28), blurRadius: 20, offset: const Offset(0, 8))],
+      ),
+      child: Row(children: [
+        SizedBox(
+          width: 104,
+          height: 104,
+          child: Stack(alignment: Alignment.center, children: [
+            SizedBox(
+              width: 104,
+              height: 104,
+              child: CircularProgressIndicator(
+                value: loading ? null : score / 100,
+                strokeWidth: 9,
+                backgroundColor: Colors.white.withValues(alpha: 0.12),
+                valueColor: AlwaysStoppedAnimation<Color>(t.color),
+                strokeCap: StrokeCap.round,
+              ),
+            ),
+            Column(mainAxisSize: MainAxisSize.min, children: [
+              Text(loading ? '…' : '$score',
+                  style: const TextStyle(fontSize: 34, fontWeight: FontWeight.w900, color: Colors.white, height: 1)),
+              Text('/100', style: TextStyle(fontSize: 11, color: Colors.white.withValues(alpha: 0.6))),
+            ]),
+          ]),
+        ),
+        const SizedBox(width: 18),
+        Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(title, style: const TextStyle(fontSize: 12,
-                fontWeight: FontWeight.bold, color: Color(0xFF1F2937))),
-            Text(sub, style: const TextStyle(fontSize: 11, color: Color(0xFF6B7280))),
+            const Text('YOUR TRUST SCORE',
+                style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Color(0xFFB2E8E8), letterSpacing: 1.5)),
+            const SizedBox(height: 6),
+            Text(loading ? 'Calculating…' : t.label,
+                style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold, color: Colors.white)),
+            const SizedBox(height: 8),
+            Row(children: [
+              const Icon(Icons.star_rounded, color: Color(0xFFFBBF24), size: 18),
+              const SizedBox(width: 4),
+              Text(
+                t.ratingCount == 0
+                    ? 'No helper ratings yet'
+                    : '${t.rating.toStringAsFixed(1)} from ${t.ratingCount} helper${t.ratingCount == 1 ? '' : 's'}',
+                style: TextStyle(fontSize: 12, color: Colors.white.withValues(alpha: 0.85)),
+              ),
+            ]),
+            const SizedBox(height: 6),
+            Text('Helpers see how reliable you are when they price your requests.',
+                style: TextStyle(fontSize: 11, color: Colors.white.withValues(alpha: 0.55), height: 1.35)),
           ]),
         ),
       ]),
@@ -1232,63 +427,310 @@ class _FlowStep extends StatelessWidget {
   }
 }
 
-class _DemoButton extends StatefulWidget {
-  final IconData icon;
-  final String label, sub;
-  final Color color, bgColor;
-  final VoidCallback onTap;
-  const _DemoButton({required this.icon, required this.label, required this.sub,
-    required this.color, required this.bgColor, required this.onTap});
-
-  @override
-  State<_DemoButton> createState() => _DemoButtonState();
-}
-
-class _DemoButtonState extends State<_DemoButton> {
-  bool _pressed = false;
+class _StatsRow extends StatelessWidget {
+  final _TrustInputs t;
+  const _StatsRow({required this.t});
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTapDown: (_) => setState(() => _pressed = true),
-      onTapUp: (_) { setState(() => _pressed = false); widget.onTap(); },
-      onTapCancel: () => setState(() => _pressed = false),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
-        transform: Matrix4.identity()..scale(_pressed ? 0.96 : 1.0),
-        transformAlignment: Alignment.center,
-        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
-        decoration: BoxDecoration(
-          color: widget.bgColor,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: widget.color.withOpacity(0.25)),
-          boxShadow: _pressed ? null : [
-            BoxShadow(color: widget.color.withOpacity(0.12),
-                blurRadius: 8, offset: const Offset(0, 3)),
-          ],
-        ),
+    Widget stat(String value, String label, IconData icon, Color color) => Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        decoration: sarthiCard(radius: 16),
         child: Column(children: [
-          Container(
-            width: 40, height: 40,
-            decoration: BoxDecoration(color: widget.color, shape: BoxShape.circle),
-            child: Icon(widget.icon, color: Colors.white, size: 20),
+          Icon(icon, color: color, size: 20),
+          const SizedBox(height: 6),
+          Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: SarthiColors.ink)),
+          Text(label, style: const TextStyle(fontSize: 10.5, color: SarthiColors.faint)),
+        ]),
+      ),
+    );
+    return Row(children: [
+      stat('${t.completed}', 'Completed', Icons.task_alt_rounded, SarthiColors.green),
+      const SizedBox(width: 10),
+      stat('${t.active}', 'Active', Icons.schedule_rounded, SarthiColors.purple),
+      const SizedBox(width: 10),
+      stat('${t.cancelledByMe}', 'Cancelled', Icons.cancel_outlined, SarthiColors.red),
+    ]);
+  }
+}
+
+class _VerificationCard extends StatelessWidget {
+  final _TrustInputs t;
+  const _VerificationCard({required this.t});
+
+  @override
+  Widget build(BuildContext context) {
+    Widget chip(IconData icon, String label, bool done) => Expanded(
+      child: Column(children: [
+        Container(
+          width: 50,
+          height: 50,
+          decoration: BoxDecoration(
+            color: done ? SarthiColors.purpleLight : const Color(0xFFF3F4F6),
+            shape: BoxShape.circle,
           ),
-          const SizedBox(height: 8),
-          Text(widget.label, style: TextStyle(fontSize: 13,
-              fontWeight: FontWeight.bold, color: widget.color)),
-          const SizedBox(height: 2),
-          Text(widget.sub, textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 10, color: Color(0xFF6B7280))),
-          const SizedBox(height: 8),
+          child: Icon(icon, color: done ? SarthiColors.purpleDark : const Color(0xFFD1D5DB), size: 23),
+        ),
+        const SizedBox(height: 7),
+        Text(label,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: SarthiColors.body, height: 1.3)),
+        const SizedBox(height: 4),
+        Icon(done ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
+            size: 15, color: done ? const Color(0xFF22C55E) : const Color(0xFFD1D5DB)),
+      ]),
+    );
+    final missing = [
+      if (!t.emailVerified) 'verify your email',
+      if (!t.phoneAdded) 'add your phone number',
+      if (!t.photoAdded) 'add a profile photo',
+    ];
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 16, 10, 14),
+      decoration: sarthiCard(),
+      child: Column(children: [
+        Row(children: [
+          chip(Icons.email_rounded, 'Email\nverified', t.emailVerified),
+          chip(Icons.phone_android_rounded, 'Phone\nadded', t.phoneAdded),
+          chip(Icons.photo_camera_rounded, 'Profile\nphoto', t.photoAdded),
+          chip(Icons.badge_rounded, 'Profile\ncomplete', t.profileComplete),
+        ]),
+        if (missing.isNotEmpty) ...[
+          const SizedBox(height: 12),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              color: widget.color,
-              borderRadius: BorderRadius.circular(20),
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(color: SarthiColors.amberLight, borderRadius: BorderRadius.circular(12)),
+            child: Text(
+              'Raise your score: ${missing.join(', ')} (Profile tab).',
+              style: const TextStyle(fontSize: 11.5, color: Color(0xFF92400E), fontWeight: FontWeight.w600),
             ),
-            child: const Text('Launch Demo →',
-                style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold,
-                    color: Colors.white)),
+          ),
+        ],
+      ]),
+    );
+  }
+}
+
+class _BreakdownCard extends StatelessWidget {
+  final _TrustInputs t;
+  const _BreakdownCard({required this.t});
+
+  @override
+  Widget build(BuildContext context) {
+    Widget row(String label, String detail, int pts, int max) {
+      final neg = pts < 0;
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 7),
+        child: Row(children: [
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(label, style: const TextStyle(fontWeight: FontWeight.w700, color: SarthiColors.ink, fontSize: 13)),
+              Text(detail, style: const TextStyle(fontSize: 11, color: SarthiColors.faint)),
+            ]),
+          ),
+          Text(
+            neg ? '$pts' : (max == 0 ? '+$pts' : '+$pts / $max'),
+            style: TextStyle(
+                fontWeight: FontWeight.w800, fontSize: 13, color: neg ? SarthiColors.red : SarthiColors.green),
+          ),
+        ]),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
+      decoration: sarthiCard(),
+      child: Column(children: [
+        row('Starting score', 'Everyone starts here', _TrustInputs.basePts, 0),
+        const Divider(height: 1),
+        row('Verification', 'Email, phone, photo, complete profile', t.verificationPts, 25),
+        const Divider(height: 1),
+        row('Completed bookings', '${t.completed} completed (1.5 points each, up to 10)', t.bookingPts, 15),
+        const Divider(height: 1),
+        row(
+          'Helper ratings',
+          t.ratingCount == 0 ? 'Neutral until helpers rate you' : 'Average ${t.rating.toStringAsFixed(1)} from ${t.ratingCount}',
+          t.ratingPts,
+          20,
+        ),
+        if (t.cancelPts < 0) ...[
+          const Divider(height: 1),
+          row('Cancellations', '${t.cancelledByMe} booking(s) you cancelled', t.cancelPts, 0),
+        ],
+      ]),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REVIEWS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// "Ramesh rated you — rate him to see what he said."
+class _PendingReviewsCard extends StatelessWidget {
+  final List<Booking> bookings;
+  const _PendingReviewsCard({required this.bookings});
+
+  @override
+  Widget build(BuildContext context) {
+    final first = bookings.first;
+    final name = first.helperName.split(' ').first;
+    final more = bookings.length - 1;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFFBEB),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFFDE68A)),
+      ),
+      child: Row(children: [
+        Container(
+          width: 42,
+          height: 42,
+          decoration: const BoxDecoration(color: Color(0xFFFEF3C7), shape: BoxShape.circle),
+          child: const Icon(Icons.lock_clock_rounded, color: Color(0xFFD97706), size: 22),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(more > 0 ? '$name and $more other helper${more == 1 ? '' : 's'} rated you' : '$name rated you',
+                style: const TextStyle(fontWeight: FontWeight.bold, color: SarthiColors.ink, fontSize: 13.5)),
+            const SizedBox(height: 2),
+            const Text('Rate them back to see what they said.',
+                style: TextStyle(fontSize: 12, color: Color(0xFF92400E))),
+          ]),
+        ),
+        TextButton(
+          onPressed: () => ReviewSheet.show(context, booking: first, asCustomer: true),
+          child: const Text('Rate', style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFFD97706))),
+        ),
+      ]),
+    );
+  }
+}
+
+String _tagLabel(String id) {
+  for (final t in [...helperToCustomerTags, ...customerToHelperTags]) {
+    if (t.id == id) return t.label;
+  }
+  return id.replaceAll('_', ' ');
+}
+
+bool _tagPositive(String id) {
+  for (final t in [...helperToCustomerTags, ...customerToHelperTags]) {
+    if (t.id == id) return t.positive;
+  }
+  return true;
+}
+
+class _Stars extends StatelessWidget {
+  final int value;
+  final double size;
+  const _Stars(this.value, {this.size = 15});
+  @override
+  Widget build(BuildContext context) => Row(mainAxisSize: MainAxisSize.min, children: [
+    for (var i = 0; i < 5; i++)
+      Icon(i < value ? Icons.star_rounded : Icons.star_outline_rounded,
+          size: size, color: i < value ? const Color(0xFFF59E0B) : const Color(0xFFD1D5DB)),
+  ]);
+}
+
+class _ReviewCard extends StatelessWidget {
+  final Map<String, dynamic> data;
+  final bool received;
+  const _ReviewCard({required this.data, required this.received});
+
+  @override
+  Widget build(BuildContext context) {
+    final name = '${data['fromFirstName'] ?? 'Helper'}';
+    final rating = (data['rating'] as num?)?.toInt() ?? 0;
+    final tags = (data['tags'] as List?)?.whereType<String>().toList() ?? const <String>[];
+    final comment = '${data['comment'] ?? ''}'.trim();
+    final service = '${data['serviceName'] ?? ''}';
+    final ts = data['createdAt'];
+    final when = ts is Timestamp ? DateFormat('d MMM yyyy').format(ts.toDate()) : '';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: sarthiCard(),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          SarthiAvatar(name: name, size: 38),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(name, style: const TextStyle(fontWeight: FontWeight.bold, color: SarthiColors.ink, fontSize: 13.5)),
+              Text([if (service.isNotEmpty) service, if (when.isNotEmpty) when].join(' · '),
+                  style: const TextStyle(fontSize: 11, color: SarthiColors.faint)),
+            ]),
+          ),
+          _Stars(rating),
+        ]),
+        if (tags.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Wrap(spacing: 6, runSpacing: 6, children: [
+            for (final t in tags)
+              SarthiChip(_tagLabel(t), color: _tagPositive(t) ? SarthiColors.green : SarthiColors.red),
+          ]),
+        ],
+        if (comment.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Text('“$comment”', style: const TextStyle(fontSize: 12.5, color: SarthiColors.body, height: 1.4)),
+        ],
+      ]),
+    );
+  }
+}
+
+class _GivenReviewTile extends StatelessWidget {
+  final Map<String, dynamic> data;
+  const _GivenReviewTile({required this.data});
+
+  @override
+  Widget build(BuildContext context) {
+    final rating = (data['rating'] as num?)?.toInt() ?? 0;
+    final service = '${data['serviceName'] ?? 'Service'}';
+    final comment = '${data['comment'] ?? ''}'.trim();
+    final tags = (data['tags'] as List?)?.whereType<String>().toList() ?? const <String>[];
+    final ts = data['createdAt'];
+    final when = ts is Timestamp ? DateFormat('d MMM').format(ts.toDate()) : '';
+    final bookingId = '${data['bookingId'] ?? ''}';
+
+    return GestureDetector(
+      onTap: bookingId.isEmpty
+          ? null
+          : () => Navigator.of(context)
+          .push(MaterialPageRoute(builder: (_) => BookingTrackerScreen(bookingId: bookingId))),
+      child: Container(
+        width: 210,
+        padding: const EdgeInsets.all(14),
+        decoration: sarthiCard(),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Expanded(
+              child: Text(service,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.bold, color: SarthiColors.ink, fontSize: 13)),
+            ),
+            Text(when, style: const TextStyle(fontSize: 10.5, color: SarthiColors.faint)),
+          ]),
+          const SizedBox(height: 6),
+          _Stars(rating, size: 16),
+          const SizedBox(height: 8),
+          Expanded(
+            child: Text(
+              comment.isNotEmpty ? '“$comment”' : (tags.isEmpty ? 'No comment' : tags.map(_tagLabel).join(' · ')),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontSize: 12,
+                  color: comment.isEmpty && tags.isEmpty ? SarthiColors.faint : SarthiColors.body,
+                  height: 1.35),
+            ),
           ),
         ]),
       ),
@@ -1297,1727 +739,147 @@ class _DemoButtonState extends State<_DemoButton> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LEARN MORE BUTTON
+// REPORTS
 // ─────────────────────────────────────────────────────────────────────────────
-class _LearnMoreButton extends StatelessWidget {
-  const _LearnMoreButton();
+
+class _ReportCard extends StatelessWidget {
+  final Map<String, dynamic> data;
+  const _ReportCard({required this.data});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      height: 56,
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [Color(0xFF3B1F8C), Color(0xFF5B21B6)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(18),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF5B21B6).withOpacity(0.35),
-            blurRadius: 16,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(18),
-          onTap: () {},
-          child: const Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.help_outline_rounded, color: Colors.white, size: 20),
-              SizedBox(width: 10),
-              Text(
-                'Learn More About Safety',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.white,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SIMPLE SHIMMER  (lightweight — no shimmer package needed)
-// ─────────────────────────────────────────────────────────────────────────────
-class _SimpleShimmer extends StatefulWidget {
-  final double height;
-  final int count;
-  const _SimpleShimmer({required this.height, required this.count});
-
-  @override
-  State<_SimpleShimmer> createState() => _SimpleShimmerState();
-}
-
-class _SimpleShimmerState extends State<_SimpleShimmer>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _c;
-
-  @override
-  void initState() {
-    super.initState();
-    _c = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 900))
-      ..repeat(reverse: true);
-  }
-
-  @override
-  void dispose() {
-    _c.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _c,
-      builder: (_, __) => Column(
-        children: List.generate(
-          widget.count,
-              (_) => Container(
-            margin: const EdgeInsets.only(bottom: 10),
-            height: widget.height,
-            decoration: BoxDecoration(
-              color: Color.lerp(
-                  const Color(0xFFF3F4F6), const Color(0xFFE5E7EB), _c.value),
-              borderRadius: BorderRadius.circular(18),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-//  MUTUAL REVIEW SHEET — Call this from booking completion, NOT from initState
-//
-//  Usage (from your booking completion screen):
-//    MutualReviewSheet.showForUser(context, bookingId: ..., helperId: ..., ...)
-//    MutualReviewSheet.showForHelper(context, bookingId: ..., userId: ..., ...)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-enum _ReviewerRole { user, helper }
-
-class MutualReviewSheet extends StatefulWidget {
-  final String bookingId;
-  final String revieweeId;
-  final String revieweeName;
-  final String serviceName;
-  final _ReviewerRole role;
-  // ── Set to true to pre-fill with demo data for team presentations.
-  // ── Remove or set false before production release.
-  final bool demoMode;
-  final VoidCallback? onAfterClose;
-
-  const MutualReviewSheet._({
-    required this.bookingId,
-    required this.revieweeId,
-    required this.revieweeName,
-    required this.serviceName,
-    required this.role,
-    this.demoMode = false,
-    this.onAfterClose,
-  });
-
-  static Future<void> showForUser(
-      BuildContext context, {
-        required String bookingId,
-        required String helperId,
-        required String helperName,
-        required String serviceName,
-        bool demoMode = false,
-        VoidCallback? onAfterClose,
-      }) {
-    return showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      useSafeArea: true,
-      isDismissible: false,
-      enableDrag: false,
-      builder: (_) => MutualReviewSheet._(
-        bookingId: bookingId,
-        revieweeId: helperId,
-        revieweeName: helperName,
-        serviceName: serviceName,
-        role: _ReviewerRole.user,
-        demoMode: demoMode,
-        onAfterClose: onAfterClose,
-      ),
-    );
-  }
-
-  static Future<void> showForHelper(
-      BuildContext context, {
-        required String bookingId,
-        required String userId,
-        required String userName,
-        required String serviceName,
-        bool demoMode = false,
-        VoidCallback? onAfterClose,
-      }) {
-    return showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      useSafeArea: true,
-      isDismissible: false,
-      enableDrag: false,
-      builder: (_) => MutualReviewSheet._(
-        bookingId: bookingId,
-        revieweeId: userId,
-        revieweeName: userName,
-        serviceName: serviceName,
-        role: _ReviewerRole.helper,
-        demoMode: demoMode,
-        onAfterClose: onAfterClose,
-      ),
-    );
-  }
-
-  @override
-  State<MutualReviewSheet> createState() => _MutualReviewSheetState();
-}
-
-class _MutualReviewSheetState extends State<MutualReviewSheet>
-    with SingleTickerProviderStateMixin {
-  int _step = 0;
-  int _starRating = 0;
-  bool _submitting = false;
-  final Map<int, int> _answers = {};
-
-  final TextEditingController _noteController = TextEditingController();
-
-  late final AnimationController _doneAnim;
-  late final Animation<double> _doneScale;
-
-  @override
-  void initState() {
-    super.initState();
-    _doneAnim = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 500));
-    _doneScale = Tween<double>(begin: 0.4, end: 1.0).animate(
-        CurvedAnimation(parent: _doneAnim, curve: Curves.elasticOut));
-
-    if (widget.demoMode) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        final qs = widget.role == _ReviewerRole.user
-            ? _userQuestions(widget.serviceName)
-            : _helperQuestions(widget.serviceName);
-        setState(() {
-          for (var i = 0; i < qs.length; i++) {
-            _answers[i] = 0;
-          }
-          _starRating = 5;
-          _noteController.text = widget.role == _ReviewerRole.user
-              ? 'Rajesh was extremely professional and fixed the issue faster than expected. Highly recommend!'
-              : 'Arjun was very respectful and had all the necessary tools ready. Great customer!';
-        });
-      });
-    }
-  }
-
-  @override
-  void dispose() {
-    _doneAnim.dispose();
-    _noteController.dispose();
-    super.dispose();
-  }
-
-  List<_ReviewQuestion> get _questions => widget.role == _ReviewerRole.user
-      ? _userQuestions(widget.serviceName)
-      : _helperQuestions(widget.serviceName);
-
-  bool get _allAnswered => _answers.length == _questions.length;
-
-  Future<void> _submit() async {
-    if (_starRating == 0) return;
-    setState(() => _submitting = true);
-
-    try {
-      final reviewerId = FirebaseAuth.instance.currentUser?.uid ?? '';
-      final isUserRole = widget.role == _ReviewerRole.user;
-      final note = _noteController.text.trim();
-
-      final reviewData = {
-        'bookingId':    widget.bookingId,
-        'reviewerId':   reviewerId,
-        'reviewerName': FirebaseAuth.instance.currentUser?.displayName ??
-            (isUserRole ? 'User' : 'Helper'),
-        'revieweeId':   widget.revieweeId,
-        'revieweeName': widget.revieweeName,
-        'role':         isUserRole ? 'user' : 'helper',
-        'starRating':   _starRating,
-        'answers':      _answers.map(
-                (k, v) => MapEntry(_questions[k].question, _questions[k].options[v])),
-        if (note.isNotEmpty) 'additionalNote': note,
-        'serviceName':  widget.serviceName,
-        'createdAt':    FieldValue.serverTimestamp(),
-      };
-
-      await FirebaseFirestore.instance
-          .collection('reviews')
-          .doc(widget.bookingId)
-          .collection(isUserRole ? 'user_to_helper' : 'helper_to_user')
-          .add(reviewData);
-
-      await FirebaseFirestore.instance.collection('reviewHistory').add({
-        'userId':      isUserRole
-            ? FirebaseAuth.instance.currentUser?.uid ?? ''
-            : widget.revieweeId,
-        'helperId':    isUserRole
-            ? widget.revieweeId
-            : FirebaseAuth.instance.currentUser?.uid ?? '',
-        'helperName':  isUserRole ? widget.revieweeName : '',
-        'bookingId':   widget.bookingId,
-        'serviceName': widget.serviceName,
-        'rating':      _starRating,
-        'answers':     _answers.map(
-                (k, v) => MapEntry(_questions[k].question, _questions[k].options[v])),
-        'role':        isUserRole ? 'user' : 'helper',
-        'createdAt':   FieldValue.serverTimestamp(),
-      });
-
-      // ── FIXED (Problem B): Booking lookup with docId fallback ────────────
-      if (isUserRole) {
-        final currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
-        // Try by bookingCode field first, fallback to doc ID
-        var bookingSnap = await FirebaseFirestore.instance
-            .collection('bookings')
-            .where('bookingCode', isEqualTo: widget.bookingId)
-            .where('userId', isEqualTo: currentUid)
-            .limit(1)
-            .get();
-
-        final updateData = {
-          'status': 'completed',
-          'completedAt': FieldValue.serverTimestamp(),
-          'userRating': _starRating,
-          'userReviewDone': true,
-          if (note.isNotEmpty) 'userReview': note,
-        };
-
-        if (bookingSnap.docs.isEmpty) {
-          final directDoc = await FirebaseFirestore.instance
-              .collection('bookings')
-              .doc(widget.bookingId)
-              .get();
-          if (directDoc.exists) {
-            await directDoc.reference.update(updateData);
-          }
-        } else {
-          await bookingSnap.docs.first.reference.update(updateData);
-        }
-      } else {
-        // Helper-role: also save helperRating to booking doc
-        final directDoc = await FirebaseFirestore.instance
-            .collection('bookings')
-            .doc(widget.bookingId)
-            .get();
-        if (directDoc.exists) {
-          await directDoc.reference.update({
-            'helperRating': _starRating,
-            if (note.isNotEmpty) 'helperReview': note,
-            'helperRatedAt': FieldValue.serverTimestamp(),
-          });
-        }
-      }
-
-      // ── FIXED (Problem A): Safe avg rating update with null/missing-doc guard
-      final targetCollection = isUserRole ? 'helpers' : 'users';
-      final targetDocRef = FirebaseFirestore.instance
-          .collection(targetCollection).doc(widget.revieweeId);
-
-      await FirebaseFirestore.instance.runTransaction((txn) async {
-        final snap = await txn.get(targetDocRef);
-        final prev = (snap.exists ? (snap.data()?['totalRatingSum'] as num?)?.toDouble() : null) ?? 0.0;
-        final count = (snap.exists ? (snap.data()?['reviewCount'] as int?) : null) ?? 0;
-        final newSum = prev + _starRating;
-        final newCount = count + 1;
-        txn.set(
-          targetDocRef,
-          {
-            'totalRatingSum': newSum,
-            'reviewCount': newCount,
-            'avgRating': double.parse((newSum / newCount).toStringAsFixed(1)),
-            'lastReviewedAt': FieldValue.serverTimestamp(),
-          },
-          SetOptions(merge: true),
-        );
-      });
-
-      // ── Auto-flag low-rated users ─────────────────────────────────────────
-      if (!isUserRole && _starRating <= 2) {
-        await FirebaseFirestore.instance
-            .collection('users')
-            .doc(widget.revieweeId)
-            .set({
-          'flagCount':     FieldValue.increment(1),
-          'lastFlaggedAt': FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true));
-      }
-
-      // ── Firestore notification ────────────────────────────────────────────
-      // ── Firestore notification ────────────────────────────────────────────
-      if (isUserRole) {
-        final currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
-        await FirebaseFirestore.instance
-            .collection('notifications')
-            .doc(currentUid)
-            .collection('items')
-            .add({
-          'type':      'service_completed',
-          'title':     'Service Completed',
-          'body':      'How was your experience with ${widget.serviceName}? Tap to rate.',
-          'bookingId': widget.bookingId,
-          'rating':    0,
-          'read':      false,
-          'createdAt': FieldValue.serverTimestamp(),
-        });
-      }
-
-      // ── Write 1: helpers/{helperId}/reviews subcollection ─────────────────
-      if (isUserRole) {
-        await FirebaseFirestore.instance
-            .collection('helpers')
-            .doc(widget.revieweeId)
-            .collection('reviews')
-            .add({
-          'bookingId':    widget.bookingId,
-          'userId':       reviewerId,
-          'reviewerId':   reviewerId,
-          'reviewerName': FirebaseAuth.instance.currentUser?.displayName ?? 'User',
-          'userName':     FirebaseAuth.instance.currentUser?.displayName ?? 'User',
-          'serviceName':  widget.serviceName,
-          'starRating':   _starRating,
-          'answers':      _answers.map((k, v) =>
-              MapEntry(_questions[k].question, _questions[k].options[v])),
-          if (_noteController.text.trim().isNotEmpty)
-            'additionalNote': _noteController.text.trim(),
-          'createdAt':    FieldValue.serverTimestamp(),
-        });
-      }
-
-      // ── Write 2: users/{reviewerId}/reviewsGiven subcollection ────────────
-      if (isUserRole) {
-        await FirebaseFirestore.instance
-            .collection('users')
-            .doc(reviewerId)
-            .collection('reviewsGiven')
-            .add({
-          'bookingId':   widget.bookingId,
-          'helperId':    widget.revieweeId,
-          'helperName':  widget.revieweeName,
-          'serviceName': widget.serviceName,
-          'starRating':  _starRating,
-          'answers':     _answers.map((k, v) =>
-              MapEntry(_questions[k].question, _questions[k].options[v])),
-          'createdAt':   FieldValue.serverTimestamp(),
-        });
-      }
-
-      setState(() {
-        _step = 2;
-        _submitting = false;
-      });
-      _doneAnim.forward();
-
-    } catch (e) {
-      setState(() => _submitting = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error submitting review: $e')),
-      );
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
-      ),
-      child: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 280),
-        transitionBuilder: (child, anim) => FadeTransition(
-          opacity: anim,
-          child: child,
-        ),
-        child: _step == 2
-            ? _DoneView(
-          key: const ValueKey('done'),
-          role: widget.role,
-          revieweeName: widget.revieweeName,
-          anim: _doneScale,
-          onClose: () async {
-            // chatId = Firestore bookingId per BookingChatService contract
-            final chatId = widget.bookingId;
-            await RealtimeDbService.instance.deleteChat(chatId);
-            await FirebaseFirestore.instance
-                .collection('chats')
-                .doc(chatId)
-                .update({'bookingStatus': 'review_done'})
-                .catchError((_) {});
-            if (context.mounted) Navigator.pop(context);
-            widget.onAfterClose?.call();
-          },
-        )
-            : _step == 1
-            ? _RatingView(
-          key: const ValueKey('rating'),
-          role: widget.role,
-          revieweeName: widget.revieweeName,
-          starRating: _starRating,
-          submitting: _submitting,
-          onStar: (s) => setState(() => _starRating = s),
-          onBack: () => setState(() => _step = 0),
-          onSubmit: _submit,
-        )
-            : _QuestionsView(
-          key: const ValueKey('questions'),
-          role: widget.role,
-          questions: _questions,
-          answers: _answers,
-          revieweeName: widget.revieweeName,
-          serviceName: widget.serviceName,
-          allAnswered: _allAnswered,
-          noteController: _noteController,
-          onAnswer: (q, a) => setState(() => _answers[q] = a),
-          onNext: () => setState(() => _step = 1),
-        ),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// STEP 0 — QUESTIONS VIEW
-// ─────────────────────────────────────────────────────────────────────────────
-class _QuestionsView extends StatelessWidget {
-  final _ReviewerRole role;
-  final List<_ReviewQuestion> questions;
-  final Map<int, int> answers;
-  final String revieweeName;
-  final String serviceName;
-  final bool allAnswered;
-  final TextEditingController noteController;
-  final Function(int q, int a) onAnswer;
-  final VoidCallback onNext;
-
-  const _QuestionsView({
-    super.key,
-    required this.role,
-    required this.questions,
-    required this.answers,
-    required this.revieweeName,
-    required this.serviceName,
-    required this.allAnswered,
-    required this.noteController,
-    required this.onAnswer,
-    required this.onNext,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final isUser = role == _ReviewerRole.user;
-    final accentColor =
-    isUser ? const Color(0xFF7C3AED) : const Color(0xFF0D9488);
-
-    return DraggableScrollableSheet(
-      initialChildSize: 0.88,
-      minChildSize: 0.70,
-      maxChildSize: 0.95,
-      expand: false,
-      builder: (_, ctrl) => Column(
-        children: [
+    final status = '${data['status'] ?? 'open'}';
+    final (label, color) = switch (status) {
+      'resolved' || 'closed' => ('Resolved', SarthiColors.green),
+      'in_review' || 'reviewing' => ('In review', SarthiColors.amber),
+      _ => ('Open', SarthiColors.purple),
+    };
+    final ts = data['createdAt'];
+    final when = ts is Timestamp ? DateFormat('d MMM yyyy, h:mm a').format(ts.toDate()) : '';
+    final bookingId = '${data['bookingId'] ?? ''}';
+    return GestureDetector(
+      onTap: bookingId.isEmpty
+          ? null
+          : () => Navigator.of(context)
+          .push(MaterialPageRoute(builder: (_) => BookingTrackerScreen(bookingId: bookingId))),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.all(14),
+        decoration: sarthiCard(),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Container(
-            margin: const EdgeInsets.symmetric(vertical: 12),
-            width: 42,
-            height: 4,
-            decoration: BoxDecoration(
-                color: const Color(0xFFE5E7EB),
-                borderRadius: BorderRadius.circular(2)),
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(color: color.withValues(alpha: 0.12), shape: BoxShape.circle),
+            child: Icon(Icons.flag_rounded, color: color, size: 19),
           ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(22, 0, 22, 16),
-            child: Row(
-              children: [
-                Container(
-                  width: 46,
-                  height: 46,
-                  decoration: BoxDecoration(
-                    color: accentColor.withOpacity(0.10),
-                    borderRadius: BorderRadius.circular(13),
-                  ),
-                  child: Icon(
-                    isUser
-                        ? Icons.rate_review_rounded
-                        : Icons.engineering_rounded,
-                    color: accentColor,
-                    size: 24,
-                  ),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        isUser ? 'Review $revieweeName' : 'Review this Customer',
-                        style: const TextStyle(
-                            fontSize: 17,
-                            fontWeight: FontWeight.bold,
-                            color: Color(0xFF1F2937)),
-                      ),
-                      Text(
-                        isUser
-                            ? 'How was your $serviceName experience?'
-                            : 'How did the customer treat you?',
-                        style: const TextStyle(
-                            fontSize: 12, color: Color(0xFF6B7280)),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 22),
-            child: _ProgressBar(
-              answered: answers.length,
-              total: questions.length,
-              color: accentColor,
-            ),
-          ),
-          const SizedBox(height: 16),
+          const SizedBox(width: 10),
           Expanded(
-            child: ListView.builder(
-              controller: ctrl,
-              padding: const EdgeInsets.fromLTRB(22, 0, 22, 20),
-              // questions + 1 extra item for the optional note box
-              itemCount: questions.length + 1,
-              itemBuilder: (_, i) {
-                // Last item → optional additional note text field
-                if (i == questions.length) {
-                  return _AdditionalNoteBox(
-                    controller: noteController,
-                    accentColor: accentColor,
-                  );
-                }
-                return _QuestionCard(
-                  index: i,
-                  question: questions[i],
-                  selectedOption: answers[i],
-                  accentColor: accentColor,
-                  onSelect: (a) => onAnswer(i, a),
-                );
-              },
-            ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('${data['reason'] ?? ''}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w600, color: SarthiColors.ink, fontSize: 13)),
+              const SizedBox(height: 3),
+              Text(when, style: const TextStyle(fontSize: 11, color: SarthiColors.faint)),
+            ]),
           ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(22, 8, 22, 20),
-            child: SizedBox(
-              width: double.infinity,
-              height: 54,
-              child: ElevatedButton(
-                onPressed: allAnswered ? onNext : null,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: accentColor,
-                  disabledBackgroundColor: const Color(0xFFE5E7EB),
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(18)),
-                ),
-                child: Text(
-                  allAnswered
-                      ? 'Next — Give Your Rating →'
-                      : 'Answer all questions to continue',
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                    color: allAnswered ? Colors.white : const Color(0xFF9CA3AF),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
+          SarthiChip(label, color: color),
+        ]),
       ),
     );
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// OPTIONAL ADDITIONAL NOTE BOX  (appears after all questions in the list)
+// SAFETY FEATURES
 // ─────────────────────────────────────────────────────────────────────────────
-class _AdditionalNoteBox extends StatelessWidget {
-  final TextEditingController controller;
-  final Color accentColor;
 
-  const _AdditionalNoteBox({
-    required this.controller,
-    required this.accentColor,
-  });
+class _SafetyFeatures extends StatelessWidget {
+  const _SafetyFeatures();
+
+  static const _items = [
+    (Icons.verified_user_rounded, 'Verified helpers',
+    'Every helper submits Aadhaar and PAN, checked by our team before they can send prices.'),
+    (Icons.pin_rounded, '4-digit start code',
+    'Work starts only when you tell the helper the code shown in your booking. Never share it on a call.'),
+    (Icons.payments_rounded, 'Pay after the work',
+    'No money goes through the app. Pay the agreed price by cash or UPI only after the job is done.'),
+    (Icons.chat_rounded, 'Chat inside the app',
+    'Keep plans and price talk in the booking chat, so there is a record if something goes wrong.'),
+    (Icons.star_half_rounded, 'Two-way reviews',
+    'You rate helpers and helpers rate you. Ratings decide who appears first for everyone.'),
+    (Icons.sos_rounded, 'Emergency help',
+    'Use the emergency button on Home to reach police, ambulance or fire services quickly.'),
+  ];
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF9FAFB),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: const Color(0xFFF0F0F5)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header row
-          Row(
-            children: [
-              Container(
-                width: 24,
-                height: 24,
-                decoration: BoxDecoration(
-                  color: accentColor.withOpacity(0.10),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(Icons.edit_note_rounded,
-                    color: accentColor, size: 14),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  'Anything else you\'d like to add? (Optional)',
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF1F2937),
-                    height: 1.4,
-                  ),
-                ),
-              ),
-              Container(
-                padding:
-                const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color: accentColor.withOpacity(0.08),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  'OPTIONAL',
-                  style: TextStyle(
-                    fontSize: 8,
-                    fontWeight: FontWeight.bold,
-                    color: accentColor,
-                    letterSpacing: 0.6,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 4),
+      padding: const EdgeInsets.fromLTRB(14, 6, 14, 6),
+      decoration: sarthiCard(),
+      child: Column(children: [
+        for (var i = 0; i < _items.length; i++) ...[
+          if (i > 0) const Divider(height: 1),
           Padding(
-            padding: const EdgeInsets.only(left: 34),
-            child: Text(
-              'Share anything not covered in the questions above.',
-              style: const TextStyle(
-                fontSize: 11,
-                color: Color(0xFF9CA3AF),
-                height: 1.4,
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          // Text field
-          TextField(
-            controller: controller,
-            maxLines: 4,
-            maxLength: 300,
-            textCapitalization: TextCapitalization.sentences,
-            style: const TextStyle(
-              fontSize: 13,
-              color: Color(0xFF1F2937),
-              height: 1.5,
-            ),
-            decoration: InputDecoration(
-              hintText: 'e.g. "He brought extra tools without being asked…"',
-              hintStyle: const TextStyle(
-                fontSize: 13,
-                color: Color(0xFFD1D5DB),
-                height: 1.5,
-              ),
-              filled: true,
-              fillColor: Colors.white,
-              contentPadding: const EdgeInsets.all(14),
-              counterStyle: const TextStyle(
-                fontSize: 10,
-                color: Color(0xFFB0B8CC),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(14),
-                borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(14),
-                borderSide: BorderSide(color: accentColor, width: 1.5),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ProgressBar extends StatelessWidget {
-  final int answered;
-  final int total;
-  final Color color;
-  const _ProgressBar(
-      {required this.answered, required this.total, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text('$answered / $total answered',
-                style: TextStyle(
-                    fontSize: 11,
-                    color: color,
-                    fontWeight: FontWeight.w600)),
-            Text('${total == 0 ? 0 : ((answered / total) * 100).round()}%',
-                style: TextStyle(
-                    fontSize: 11,
-                    color: color,
-                    fontWeight: FontWeight.bold)),
-          ],
-        ),
-        const SizedBox(height: 6),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(6),
-          child: LinearProgressIndicator(
-            value: total == 0 ? 0 : answered / total,
-            minHeight: 6,
-            backgroundColor: color.withOpacity(0.12),
-            valueColor: AlwaysStoppedAnimation<Color>(color),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _QuestionCard extends StatelessWidget {
-  final int index;
-  final _ReviewQuestion question;
-  final int? selectedOption;
-  final Color accentColor;
-  final ValueChanged<int> onSelect;
-
-  const _QuestionCard({
-    required this.index,
-    required this.question,
-    required this.selectedOption,
-    required this.accentColor,
-    required this.onSelect,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: selectedOption != null
-            ? accentColor.withOpacity(0.04)
-            : const Color(0xFFF9FAFB),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(
-          color: selectedOption != null
-              ? accentColor.withOpacity(0.22)
-              : const Color(0xFFF0F0F5),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
+            padding: const EdgeInsets.symmetric(vertical: 11),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Container(
-                width: 24,
-                height: 24,
+                width: 38,
+                height: 38,
                 decoration: BoxDecoration(
-                  color: accentColor.withOpacity(0.12),
-                  shape: BoxShape.circle,
+                  gradient: const LinearGradient(colors: [_navy, _teal]),
+                  borderRadius: BorderRadius.circular(12),
                 ),
-                child: Center(
-                  child: Text(
-                    '${index + 1}',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                      color: accentColor,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  question.question,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF1F2937),
-                    height: 1.4,
-                  ),
-                ),
-              ),
-              if (selectedOption != null)
-                Icon(Icons.check_circle_rounded, color: accentColor, size: 18),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: question.options.asMap().entries.map((e) {
-              final isSelected = selectedOption == e.key;
-              return GestureDetector(
-                onTap: () => onSelect(e.key),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 140),
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 9),
-                  decoration: BoxDecoration(
-                    color: isSelected ? accentColor : Colors.white,
-                    borderRadius: BorderRadius.circular(24),
-                    border: Border.all(
-                      color: isSelected
-                          ? accentColor
-                          : const Color(0xFFE5E7EB),
-                      width: isSelected ? 1.5 : 1,
-                    ),
-                    boxShadow: isSelected
-                        ? [
-                      BoxShadow(
-                        color: accentColor.withOpacity(0.25),
-                        blurRadius: 8,
-                        offset: const Offset(0, 3),
-                      ),
-                    ]
-                        : null,
-                  ),
-                  child: Text(
-                    e.value,
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: isSelected
-                          ? FontWeight.bold
-                          : FontWeight.w500,
-                      color: isSelected
-                          ? Colors.white
-                          : const Color(0xFF374151),
-                    ),
-                  ),
-                ),
-              );
-            }).toList(),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// STEP 1 — STAR RATING VIEW
-// ─────────────────────────────────────────────────────────────────────────────
-class _RatingView extends StatelessWidget {
-  final _ReviewerRole role;
-  final String revieweeName;
-  final int starRating;
-  final bool submitting;
-  final ValueChanged<int> onStar;
-  final VoidCallback onBack;
-  final VoidCallback onSubmit;
-
-  const _RatingView({
-    super.key,
-    required this.role,
-    required this.revieweeName,
-    required this.starRating,
-    required this.submitting,
-    required this.onStar,
-    required this.onBack,
-    required this.onSubmit,
-  });
-
-  String get _ratingLabel {
-    switch (starRating) {
-      case 1: return 'Very Poor 😞';
-      case 2: return 'Below Average 😕';
-      case 3: return 'Average 🙂';
-      case 4: return 'Good 😊';
-      case 5: return 'Excellent! 🌟';
-      default: return 'Tap a star to rate';
-    }
-  }
-
-  Color get _accentColor => role == _ReviewerRole.user
-      ? const Color(0xFF7C3AED)
-      : const Color(0xFF0D9488);
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 42,
-            height: 4,
-            decoration: BoxDecoration(
-                color: const Color(0xFFE5E7EB),
-                borderRadius: BorderRadius.circular(2)),
-          ),
-          const SizedBox(height: 24),
-          Container(
-            width: 72,
-            height: 72,
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [_accentColor.withOpacity(0.8), _accentColor],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              role == _ReviewerRole.user
-                  ? Icons.engineering_rounded
-                  : Icons.person_rounded,
-              color: Colors.white,
-              size: 36,
-            ),
-          ),
-          const SizedBox(height: 14),
-          Text(
-            revieweeName,
-            style: const TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-              color: Color(0xFF1F2937),
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            role == _ReviewerRole.user
-                ? 'How would you rate this helper overall?'
-                : 'How would you rate this customer overall?',
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-                fontSize: 13, color: Color(0xFF6B7280), height: 1.4),
-          ),
-          const SizedBox(height: 32),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(5, (i) {
-              final filled = i < starRating;
-              return GestureDetector(
-                onTap: () => onStar(i + 1),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  child: Icon(
-                    filled ? Icons.star_rounded : Icons.star_outline_rounded,
-                    size: filled ? 48 : 44,
-                    color: filled
-                        ? const Color(0xFFF59E0B)
-                        : const Color(0xFFD1D5DB),
-                  ),
-                ),
-              );
-            }),
-          ),
-          const SizedBox(height: 14),
-          AnimatedSwitcher(
-            duration: const Duration(milliseconds: 180),
-            child: Text(
-              _ratingLabel,
-              key: ValueKey(_ratingLabel),
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-                color: starRating > 0
-                    ? const Color(0xFFF59E0B)
-                    : const Color(0xFF9CA3AF),
-              ),
-            ),
-          ),
-          const SizedBox(height: 36),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: onBack,
-                  style: OutlinedButton.styleFrom(
-                    side: const BorderSide(color: Color(0xFFE5E7EB)),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16)),
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                  ),
-                  child: const Text('← Back',
-                      style: TextStyle(
-                          color: Color(0xFF6B7280),
-                          fontWeight: FontWeight.w600)),
-                ),
+                child: Icon(_items[i].$1, color: Colors.white, size: 19),
               ),
               const SizedBox(width: 12),
               Expanded(
-                flex: 2,
-                child: ElevatedButton(
-                  onPressed:
-                  starRating > 0 && !submitting ? onSubmit : null,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _accentColor,
-                    disabledBackgroundColor: const Color(0xFFE5E7EB),
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16)),
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                  ),
-                  child: submitting
-                      ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 2, color: Colors.white),
-                  )
-                      : const Text('Submit Review',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14)),
-                ),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(_items[i].$2,
+                      style: const TextStyle(fontWeight: FontWeight.bold, color: SarthiColors.ink, fontSize: 13.5)),
+                  const SizedBox(height: 2),
+                  Text(_items[i].$3, style: const TextStyle(fontSize: 12, color: SarthiColors.muted, height: 1.4)),
+                ]),
               ),
-            ],
+            ]),
           ),
         ],
-      ),
+      ]),
     );
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 2 — DONE VIEW
+// SMALL PIECES
 // ─────────────────────────────────────────────────────────────────────────────
-class _DoneView extends StatelessWidget {
-  final _ReviewerRole role;
-  final String revieweeName;
-  final Animation<double> anim;
-  final VoidCallback onClose;
 
-  const _DoneView({
-    super.key,
-    required this.role,
-    required this.revieweeName,
-    required this.anim,
-    required this.onClose,
-  });
+class _InfoCard extends StatelessWidget {
+  final String text;
+  final IconData icon;
+  const _InfoCard({required this.text, this.icon = Icons.info_outline_rounded});
 
   @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(28, 32, 28, 48),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ScaleTransition(
-            scale: anim,
-            child: Container(
-              width: 88,
-              height: 88,
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [Color(0xFF059669), Color(0xFF0D9488)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-                shape: BoxShape.circle,
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFF059669).withOpacity(0.35),
-                    blurRadius: 24,
-                    offset: const Offset(0, 8),
-                  ),
-                ],
-              ),
-              child: const Icon(Icons.check_rounded,
-                  color: Colors.white, size: 46),
-            ),
-          ),
-          const SizedBox(height: 24),
-          const Text(
-            'Review Submitted!',
-            style: TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.bold,
-              color: Color(0xFF1F2937),
-            ),
-          ),
-          const SizedBox(height: 10),
-          Text(
-            role == _ReviewerRole.user
-                ? 'Thank you for reviewing $revieweeName.\nYour feedback helps others make safe choices.'
-                : 'Thank you for your honest feedback.\nIt helps keep our community genuine & safe.',
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-                fontSize: 13, color: Color(0xFF6B7280), height: 1.6),
-          ),
-          const SizedBox(height: 24),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF0FDF4),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(
-                  color: const Color(0xFF059669).withOpacity(0.20)),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.swap_horiz_rounded,
-                    color: Color(0xFF059669), size: 22),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    role == _ReviewerRole.user
-                        ? '$revieweeName will also rate this booking — keeping things fair for everyone.'
-                        : 'The customer has also been asked to rate this booking.',
-                    style: const TextStyle(
-                        fontSize: 12,
-                        color: Color(0xFF374151),
-                        height: 1.5),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 28),
-          SizedBox(
-            width: double.infinity,
-            height: 52,
-            child: ElevatedButton(
-              onPressed: onClose,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF1F2937),
-                elevation: 0,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(16)),
-              ),
-              child: const Text('Close',
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 15)),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  Widget build(BuildContext context) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(14),
+    decoration: sarthiCard(),
+    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Icon(icon, color: SarthiColors.purple, size: 20),
+      const SizedBox(width: 10),
+      Expanded(child: Text(text, style: const TextStyle(fontSize: 12.5, color: SarthiColors.muted, height: 1.4))),
+    ]),
+  );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// REVIEW HISTORY BENTO GRID  (Change C)
-// ─────────────────────────────────────────────────────────────────────────────
-
-enum _BentoCardSize { large, medium, small }
-
-class _BentoReviewCard extends StatelessWidget {
-  final Map<String, dynamic> data;
-  final _BentoCardSize size;
-  final Color accentColor;
-  final bool isGiven; // true = review given to helper, false = received from helper
-
-  const _BentoReviewCard({
-    super.key,
-    required this.data,
-    required this.size,
-    required this.accentColor,
-    required this.isGiven,
-  });
-
-  String _relTime(DateTime dt) {
-    final diff = DateTime.now().difference(dt);
-    if (diff.inMinutes < 1) return 'Just now';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
-    if (diff.inHours < 24) return '${diff.inHours}h ago';
-    if (diff.inDays == 1) return 'Yesterday';
-    if (diff.inDays < 30) return '${diff.inDays}d ago';
-    return '${dt.day}/${dt.month}/${dt.year}';
-  }
-
+class _LoadingCard extends StatelessWidget {
+  const _LoadingCard();
   @override
-  Widget build(BuildContext context) {
-    final name = isGiven
-        ? (data['helperName'] as String? ?? 'Helper')
-        : (data['reviewerName'] as String? ??
-        data['revieweeName'] as String? ??
-        'Helper');
-
-    final stars = (data['starRating'] as int?) ?? 0;
-    final service = data['serviceName'] as String? ?? '';
-    final answers = (data['answers'] as Map<String, dynamic>? ?? {});
-    final ts = data['createdAt'] as Timestamp?;
-
-    final double avatarSize = size == _BentoCardSize.large
-        ? 40
-        : size == _BentoCardSize.medium
-        ? 32
-        : 28;
-
-    final avatarBg =
-    isGiven ? const Color(0xFFEDE9FE) : const Color(0xFFCCFBF1);
-    final avatarFg =
-    isGiven ? const Color(0xFF7C3AED) : const Color(0xFF0D9488);
-
-    // Pill answers — exclude "book/accept again" question, cap by size
-    final pillAnswers = answers.entries
-        .where((e) =>
-    !e.key.toLowerCase().contains('book') &&
-        !e.key.toLowerCase().contains('accept'))
-        .take(size == _BentoCardSize.large ? 2 : 1)
-        .toList();
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFF0F0F5)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // ── Avatar + name + stars ──────────────────────────────────
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: avatarSize,
-                height: avatarSize,
-                decoration:
-                BoxDecoration(color: avatarBg, shape: BoxShape.circle),
-                child: Center(
-                  child: Text(
-                    name.isNotEmpty ? name[0].toUpperCase() : '?',
-                    style: TextStyle(
-                      fontSize: size == _BentoCardSize.large ? 16 : 12,
-                      fontWeight: FontWeight.bold,
-                      color: avatarFg,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: size == _BentoCardSize.small ? 12 : 13,
-                        fontWeight: FontWeight.bold,
-                        color: const Color(0xFF1F2937),
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Row(
-                      children: [
-                        ...List.generate(
-                          5,
-                              (i) => Icon(
-                            Icons.star_rounded,
-                            size: 12,
-                            color: i < stars
-                                ? const Color(0xFFFBBF24)
-                                : const Color(0xFFE5E7EB),
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          '$stars.0',
-                          style: const TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
-                            color: Color(0xFFFBBF24),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-
-          // ── Medium / Large extras ──────────────────────────────────
-          if (size != _BentoCardSize.small) ...[
-            if (service.isNotEmpty) ...[
-              const SizedBox(height: 5),
-              Text(
-                service,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                    fontSize: 11, color: Color(0xFF9CA3AF)),
-              ),
-            ],
-            if (pillAnswers.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Wrap(
-                spacing: 4,
-                runSpacing: 4,
-                children: pillAnswers
-                    .map(
-                      (e) => Container(
-                    constraints: const BoxConstraints(maxWidth: 130),
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: accentColor.withOpacity(0.08),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(
-                          color: accentColor.withOpacity(0.18)),
-                    ),
-                    child: Text(
-                      e.value.toString(),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11),
-                    ),
-                  ),
-                )
-                    .toList(),
-              ),
-            ],
-            if (ts != null) ...[
-              const SizedBox(height: 5),
-              Text(
-                _relTime(ts.toDate()),
-                style: const TextStyle(
-                    fontSize: 10, color: Color(0xFFB0B8CC)),
-              ),
-            ],
-          ],
-        ],
-      ),
-    );
-  }
+  Widget build(BuildContext context) => Container(
+    height: 70,
+    decoration: sarthiCard(),
+    child: const Center(
+        child: SizedBox(
+            width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: SarthiColors.purple))),
+  );
 }
-
-class _ReviewHistoryBentoGrid extends StatelessWidget {
-  const _ReviewHistoryBentoGrid();
-
-  @override
-  Widget build(BuildContext context) {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid == null) return const SizedBox.shrink();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // ── Section A: reviews given by user ──────────────────────
-        StreamBuilder<QuerySnapshot>(
-          stream: FirebaseFirestore.instance
-              .collection('users')
-              .doc(uid)
-              .collection('reviewsGiven')
-              .orderBy('createdAt', descending: true)
-              .limit(6)
-              .snapshots(),
-          builder: (context, snap) {
-            final dataList = (snap.data?.docs ?? [])
-                .map((d) => d.data() as Map<String, dynamic>)
-                .toList();
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'REVIEWS YOU GAVE',
-                  style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.bold,
-                    color: Color(0xFF9CA3AF),
-                    letterSpacing: 1.4,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                _buildBentoSection(
-                  dataList,
-                  const Color(0xFF7C3AED),
-                  isGiven: true,
-                ),
-              ],
-            );
-          },
-        ),
-
-        const SizedBox(height: 24),
-
-        // ── Section B: reviews received from helpers ───────────────
-        StreamBuilder<QuerySnapshot>(
-          stream: FirebaseFirestore.instance
-              .collectionGroup('helper_to_user')
-              .where('revieweeId', isEqualTo: uid)
-              .orderBy('createdAt', descending: true)
-              .limit(6)
-              .snapshots(),
-          builder: (context, snap) {
-            final dataList = (snap.data?.docs ?? [])
-                .map((d) => d.data() as Map<String, dynamic>)
-                .toList();
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'REVIEWS YOU RECEIVED',
-                  style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.bold,
-                    color: Color(0xFF9CA3AF),
-                    letterSpacing: 1.4,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                _buildBentoSection(
-                  dataList,
-                  const Color(0xFF0D9488),
-                  isGiven: false,
-                ),
-              ],
-            );
-          },
-        ),
-      ],
-    );
-  }
-
-  Widget _buildBentoSection(
-      List<Map<String, dynamic>> docs,
-      Color accent, {
-        required bool isGiven,
-      }) {
-    if (docs.isEmpty) {
-      return Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: const Color(0xFFF0F0F5)),
-        ),
-        child: Row(
-          children: [
-            Icon(Icons.star_outline_rounded,
-                color: accent.withOpacity(0.4), size: 20),
-            const SizedBox(width: 10),
-            const Text(
-              'No reviews yet',
-              style: TextStyle(fontSize: 13, color: Color(0xFF9CA3AF)),
-            ),
-          ],
-        ),
-      );
-    }
-
-    if (docs.length <= 2) {
-      return Column(
-        children: docs
-            .map(
-              (d) => Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: _BentoReviewCard(
-              data: d,
-              size: _BentoCardSize.large,
-              accentColor: accent,
-              isGiven: isGiven,
-            ),
-          ),
-        )
-            .toList(),
-      );
-    }
-
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final maxW = constraints.maxWidth;
-        return Column(
-          children: [
-            // First card — large, full width
-            SizedBox(
-              height: 130,
-              child: _BentoReviewCard(
-                data: docs[0],
-                size: _BentoCardSize.large,
-                accentColor: accent,
-                isGiven: isGiven,
-              ),
-            ),
-            const SizedBox(height: 8),
-            // Second row — 2 medium cards side by side
-            Row(
-              children: [
-                SizedBox(
-                  width: (maxW - 8) / 2,
-                  height: 100,
-                  child: _BentoReviewCard(
-                    data: docs[1],
-                    size: _BentoCardSize.medium,
-                    accentColor: accent,
-                    isGiven: isGiven,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                SizedBox(
-                  width: (maxW - 8) / 2,
-                  height: 100,
-                  child: _BentoReviewCard(
-                    data: docs[2],
-                    size: _BentoCardSize.medium,
-                    accentColor: accent,
-                    isGiven: isGiven,
-                  ),
-                ),
-              ],
-            ),
-            if (docs.length > 3) ...[
-              const SizedBox(height: 8),
-              // Remaining — small cards in Wrap
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: docs
-                    .sublist(3)
-                    .map(
-                      (d) => SizedBox(
-                    width: (maxW - 16) / 3,
-                    height: 88,
-                    child: _BentoReviewCard(
-                      data: d,
-                      size: _BentoCardSize.small,
-                      accentColor: accent,
-                      isGiven: isGiven,
-                    ),
-                  ),
-                )
-                    .toList(),
-              ),
-            ],
-          ],
-        );
-      },
-    );
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-//  REVIEW QUESTION DATA
-// ═══════════════════════════════════════════════════════════════════════════════
-
-class _ReviewQuestion {
-  final String question;
-  final List<String> options;
-  const _ReviewQuestion(this.question, this.options);
-}
-
-List<_ReviewQuestion> _userQuestions(String serviceName) => [
-  _ReviewQuestion(
-    'Did the helper arrive on time?',
-    ['Yes, right on time', 'Slightly late', 'Very late', 'Did not arrive'],
-  ),
-  _ReviewQuestion(
-    'How was the quality of work done?',
-    ['Excellent', 'Good', 'Average', 'Poor'],
-  ),
-  _ReviewQuestion(
-    'Was the helper professional and polite?',
-    ['Very professional', 'Mostly yes', 'Somewhat', 'Not at all'],
-  ),
-  _ReviewQuestion(
-    'Did the helper explain the work clearly?',
-    ['Yes, clearly', 'Partially', 'No explanation given'],
-  ),
-  _ReviewQuestion(
-    'Was the price fair for the service?',
-    ['Very fair', 'Somewhat fair', 'Overcharged', 'Price not discussed'],
-  ),
-  _ReviewQuestion(
-    'Would you book this helper again?',
-    ['Definitely yes', 'Maybe', 'Probably not', 'No'],
-  ),
-];
-
-List<_ReviewQuestion> _helperQuestions(String serviceName) => [
-  _ReviewQuestion(
-    'Did the customer treat you respectfully?',
-    ['Very respectfully', 'Mostly yes', 'Somewhat rude', 'Disrespectful'],
-  ),
-  _ReviewQuestion(
-    'Was the service request genuine?',
-    [
-      'Yes, completely genuine',
-      'Seemed genuine',
-      'Slightly suspicious',
-      'Not genuine'
-    ],
-  ),
-  _ReviewQuestion(
-    'Did the customer provide correct address & access?',
-    ['Yes, everything was clear', 'Minor issues', 'Address was wrong', 'No access given'],
-  ),
-  _ReviewQuestion(
-    'Was payment handled smoothly?',
-    ['Yes, no issues', 'Minor delay', 'Refused to pay full', 'Payment issues'],
-  ),
-  _ReviewQuestion(
-    'Did the customer make unreasonable demands?',
-    ['No, totally fair', 'Minor extra requests', 'Several extras', 'Very unreasonable'],
-  ),
-  _ReviewQuestion(
-    'Would you accept a booking from this customer again?',
-    ['Definitely yes', 'Maybe', 'Hesitant', 'No'],
-  ),
-];

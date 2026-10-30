@@ -83,6 +83,31 @@ export const TEXT: Record<string, Record<Lang, Msg>> = {
     hi: { title: "अनुरोध समाप्त", body: "आपका {service} अनुरोध बिना बुकिंग के समाप्त हो गया।" },
     gu: { title: "વિનંતી સમાપ્ત", body: "તમારી {service} વિનંતી બુકિંગ વગર સમાપ્ત થઈ." },
   },
+  review_waiting_customer: {
+    en: { title: "{helper} rated you ⭐", body: "Rate {helper} too to see their review. It stays hidden until you do." },
+    hi: { title: "{helper} ने आपको रेटिंग दी ⭐", body: "उनकी समीक्षा देखने के लिए {helper} को भी रेटिंग दें।" },
+    gu: { title: "{helper} એ તમને રેટિંગ આપ્યું ⭐", body: "તેમની સમીક્ષા જોવા માટે {helper} ને પણ રેટિંગ આપો." },
+  },
+  review_waiting_helper: {
+    en: { title: "{customer} rated you ⭐", body: "Rate {customer} too to see their review. It stays hidden until you do." },
+    hi: { title: "{customer} ने आपको रेटिंग दी ⭐", body: "उनकी समीक्षा देखने के लिए {customer} को भी रेटिंग दें।" },
+    gu: { title: "{customer} એ તમને રેટિંગ આપ્યું ⭐", body: "તેમની સમીક્ષા જોવા માટે {customer} ને પણ રેટિંગ આપો." },
+  },
+  reviews_revealed_customer: {
+    en: { title: "Reviews are now visible", body: "See what {helper} said about you." },
+    hi: { title: "समीक्षाएं अब दिख रही हैं", body: "देखें {helper} ने आपके बारे में क्या कहा।" },
+    gu: { title: "સમીક્ષાઓ હવે દેખાય છે", body: "જુઓ {helper} એ તમારા વિશે શું કહ્યું." },
+  },
+  reviews_revealed_helper: {
+    en: { title: "Reviews are now visible", body: "See what {customer} said about you." },
+    hi: { title: "समीक्षाएं अब दिख रही हैं", body: "देखें {customer} ने आपके बारे में क्या कहा।" },
+    gu: { title: "સમીક્ષાઓ હવે દેખાય છે", body: "જુઓ {customer} એ તમારા વિશે શું કહ્યું." },
+  },
+  chat_message: {
+    en: { title: "New message", body: "You have a new chat message about {service}." },
+    hi: { title: "नया संदेश", body: "{service} के बारे में आपको नया चैट संदेश मिला है।" },
+    gu: { title: "નવો સંદેશ", body: "{service} વિશે તમને નવો ચેટ સંદેશ મળ્યો છે." },
+  },
   overdue: {
     en: { title: "Visit overdue", body: "The {service} visit time has passed. Please update the booking or chat." },
     hi: { title: "समय निकल गया", body: "{service} का समय निकल गया। बुकिंग अपडेट करें या चैट करें।" },

@@ -241,7 +241,13 @@ export async function sendPush(env: Env, p: Push): Promise<boolean> {
         android: {
           priority: "HIGH",
           ...(p.collapseKey ? { collapseKey: p.collapseKey } : {}),
-          notification: { channelId: p.channelId, ...(p.collapseKey ? { tag: p.collapseKey } : {}) },
+          notification: {
+            channelId: p.channelId,
+            color: "#7C3AED",
+            icon: "ic_notification",
+            defaultSound: true,
+            ...(p.collapseKey ? { tag: p.collapseKey } : {}),
+          },
         },
         apns: { payload: { aps: { sound: "default" } } },
       },

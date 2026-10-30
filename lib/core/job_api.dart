@@ -1,4 +1,3 @@
-
 // lib/core/job_api.dart
 // Every read and write for the request → quote → booking flow (free Spark plan).
 // IDENTICAL in Trouble Sarthi and Sarthi Kendra.
@@ -81,6 +80,12 @@ class JobApi {
       debugPrint('notify $event failed: $e');
       return const {};
     }
+  }
+
+  /// Tells the other person on the booking that a chat message arrived.
+  /// The Worker reads the message from the chat document itself.
+  Future<void> notifyChat(String bookingId) async {
+    await _notify('chat', bookingId: bookingId);
   }
 
   // ═══ Customer: requests ══════════════════════════════════════════════════
@@ -426,7 +431,47 @@ class JobApi {
         .orderBy('createdAt', descending: true)
         .limit(limit)
         .snapshots()
-        .map((s) => s.docs.map(Booking.fromDoc).toList());
+    // Only bookings from the new request → quote flow (they have a jobId).
+        .map((s) => s.docs.where((d) => '${d.data()['jobId'] ?? ''}'.isNotEmpty).map(Booking.fromDoc).toList());
+  }
+
+  /// Completed bookings this person still has to review (inside the 14-day window).
+  /// Customers must rate before posting a new request; helpers before sending a new price.
+  Future<List<Booking>> pendingReviews({required bool asHelper}) async {
+    if (uid.isEmpty) return const [];
+    try {
+      final s = await _db
+          .collection('bookings')
+          .where(asHelper ? 'helperId' : 'customerId', isEqualTo: uid)
+          .where('status', isEqualTo: 'completed')
+          .limit(30)
+          .get();
+      final now = DateTime.now();
+      return s.docs
+          .where((d) => '${d.data()['jobId'] ?? ''}'.isNotEmpty)
+          .map(Booking.fromDoc)
+          .where((b) =>
+      !(asHelper ? b.helperReviewed : b.customerReviewed) &&
+          b.completedAt != null &&
+          now.isBefore(b.completedAt!.add(const Duration(days: 14))))
+          .toList()
+        ..sort((a, b) => a.completedAt!.compareTo(b.completedAt!));
+    } catch (e) {
+      debugPrint('pendingReviews: $e');
+      return const [];
+    }
+  }
+
+  /// Bookings made with the old app version (read-only history).
+  Stream<List<Map<String, dynamic>>> legacyBookings() {
+    if (uid.isEmpty) return const Stream.empty();
+    return _db
+        .collection('bookings')
+        .where('userId', isEqualTo: uid)
+        .limit(50)
+        .snapshots()
+        .map((s) => s.docs.map((d) => {...d.data(), '_id': d.id}).toList())
+        .handleError((_) {});
   }
 
   Stream<Booking?> booking(String id) =>
@@ -579,7 +624,14 @@ class JobApi {
     final reviewRef = _db.collection('reviews').doc(reviewId);
     final myName = asCustomer ? booking.customerName : booking.helperName;
 
+    final bookingRef = _db.collection('bookings').doc(booking.id);
+    final otherReviewRef = _db.collection('reviews').doc('${booking.id}_${asCustomer ? 'helper' : 'customer'}');
+
     await _guard(() => _db.runTransaction((tx) async {
+      // Has the other person already reviewed? (Their review is hidden from
+      // us until we review, so we read the flag on the booking instead.)
+      final bk = await tx.get(bookingRef);
+      final otherReviewed = bk.data()?[asCustomer ? 'helperReviewed' : 'customerReviewed'] == true;
       final t = await tx.get(targetRef);
       final old = t.data() ?? const <String, dynamic>{};
       final sum = ((old['ratingSum'] as num?)?.toInt() ?? 0) + rating;
@@ -597,8 +649,12 @@ class JobApi {
         'comment': comment.length > 500 ? comment.substring(0, 500) : comment,
         'serviceName': booking.serviceName,
         'subcategoryId': booking.subcategoryId,
+        // Double-blind: visible straight away only if the other side already reviewed.
+        'visible': otherReviewed,
         'createdAt': _now,
       });
+      // Both have now reviewed → reveal the other person's review too.
+      if (otherReviewed) tx.update(otherReviewRef, {'visible': true});
       tx.set(
         targetRef,
         {
@@ -611,9 +667,32 @@ class JobApi {
         },
         SetOptions(merge: true),
       );
-      tx.update(_db.collection('bookings').doc(booking.id),
-          {asCustomer ? 'customerReviewed' : 'helperReviewed': true, 'updatedAt': _now});
-    }), 'You have already reviewed this job, or it is not completed yet.');
+      tx.update(bookingRef, {asCustomer ? 'customerReviewed' : 'helperReviewed': true, 'updatedAt': _now});
+    }), 'You have already reviewed this job, the 14-day review window has closed, or the job is not completed yet.');
+    // Tell the other person ("X rated you — rate them to see it" / "reviews are visible").
+    _notify('booking', bookingId: booking.id);
+  }
+
+  /// Your review and the other person's review of this booking.
+  /// The other review is null while it is still hidden (or not written yet).
+  Stream<Map<String, dynamic>?> review(String bookingId, String role) => _db
+      .collection('reviews')
+      .doc('${bookingId}_$role')
+      .snapshots()
+      .map((d) => d.data())
+      .handleError((_) {});
+
+  /// After the 14-day window, either side may reveal reviews that are still hidden.
+  Future<void> revealDueReviews(Booking b) async {
+    final done = b.completedAt;
+    if (done == null || DateTime.now().isBefore(done.add(const Duration(days: 14, minutes: 5)))) return;
+    for (final role in const ['customer', 'helper']) {
+      try {
+        await _db.collection('reviews').doc('${b.id}_$role').update({'visible': true});
+      } catch (_) {
+        // Not written, already visible, or not allowed yet — nothing to do.
+      }
+    }
   }
 
   // ═══ Helper KYC ══════════════════════════════════════════════════════════

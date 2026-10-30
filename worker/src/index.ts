@@ -2,7 +2,7 @@
 // Push-notification Worker for Trouble Sarthi (customers) and Sarthi Kendra (helpers).
 //
 // The apps call   POST /notify   with   Authorization: Bearer <Firebase ID token>
-// and a body of   { event: "job_created" | "pitch" | "booking", jobId?, bookingId? }.
+// and a body of   { event: "job_created" | "pitch" | "booking" | "chat", jobId?, bookingId? }.
 //
 // The Worker NEVER trusts the body for recipients or text. It reads the real
 // documents from Firestore, checks the caller is part of them, decides who
@@ -62,6 +62,11 @@ interface Recipient {
   data: Record<string, string>;
   itemId: string;          // in-app notification doc id (same id = overwrite, no duplicates)
   collapseKey?: string;
+  /** Ready-made text (chat messages); used instead of the translated template. */
+  raw?: { title: string; body: string };
+  /** false = push only, no entry in the in-app notifications list. */
+  inApp?: boolean;
+  channel?: "chat";
 }
 
 /**
@@ -84,13 +89,15 @@ async function deliver(env: Env, fs: Firestore, list: Recipient[], extraWrites: 
 
   await Promise.all(list.map(async (r) => {
     const profile = docs.get(`${r.role === "helper" ? "helpers" : "users"}/${r.uid}`);
-    const msg = render(r.key, profile?.data.lang, r.vars);
+    const msg = r.raw ?? render(r.key, profile?.data.lang, r.vars);
     const data = { type: r.key, app: r.role, ...r.data };
-    writes.push({
-      path: `notifications/${r.uid}/items/${r.itemId}`,
-      fields: { ...data, title: msg.title, body: msg.body, read: false },
-      serverTime: ["createdAt"],
-    });
+    if (r.inApp !== false) {
+      writes.push({
+        path: `notifications/${r.uid}/items/${r.itemId}`,
+        fields: { ...data, title: msg.title, body: msg.body, read: false },
+        serverTime: ["createdAt"],
+      });
+    }
     const token = latestToken(docs.get(`push_tokens/${r.uid}`), r.role);
     if (!token) return;
     const push: Push = {
@@ -98,7 +105,9 @@ async function deliver(env: Env, fs: Firestore, list: Recipient[], extraWrites: 
       title: msg.title,
       body: msg.body,
       data,
-      channelId: r.role === "helper" ? "sarthi_kendra_channel" : "trouble_sarthi_channel",
+      channelId: r.channel === "chat"
+        ? (r.role === "helper" ? "sarthi_kendra_chat" : "trouble_sarthi_chat")
+        : (r.role === "helper" ? "sarthi_kendra_channel" : "trouble_sarthi_channel"),
       collapseKey: r.collapseKey,
     };
     const alive = await sendPush(env, push);
@@ -257,6 +266,21 @@ async function onBooking(env: Env, fs: Firestore, uid: string, bookingId: string
   }
   if (d.customerPaidAt && d.status === "work_done") once("paid", [toHelper("customer_paid", "paid")]);
 
+  // Mutual (double-blind) reviews: nudge the other side, then tell both when visible.
+  if (d.status === "completed") {
+    const c = d.customerReviewed === true, h = d.helperReviewed === true;
+    if (c && h) {
+      once("reviews_revealed", [
+        toCustomer("reviews_revealed_customer", "reviews_revealed"),
+        toHelper("reviews_revealed_helper", "reviews_revealed"),
+      ]);
+    } else if (c) {
+      once("customer_reviewed", [toHelper("review_waiting_helper", "customer_reviewed")]);
+    } else if (h) {
+      once("helper_reviewed", [toCustomer("review_waiting_customer", "helper_reviewed")]);
+    }
+  }
+
   if (done.length === 0) return { skipped: "nothing new" };
   const mark: Write = {
     path: `bookings/${bookingId}`,
@@ -265,6 +289,56 @@ async function onBooking(env: Env, fs: Firestore, uid: string, bookingId: string
   };
   const sent = await deliver(env, fs, recipients, [mark]);
   return { sent, events: done };
+}
+
+// ─── Event: a chat message was sent ─────────────────────────────────────────
+
+const CHAT_PUSH_GAP_MS = 4_000;
+
+async function onChat(env: Env, fs: Firestore, uid: string, chatId: string) {
+  const chat = await fs.get(`chats/${chatId}`);
+  if (!chat) throw new HttpError(404, "chat not found");
+  const c = chat.data;
+  const participants = Array.isArray(c.participants) ? c.participants.map(String) : [];
+  if (!participants.includes(uid)) throw new HttpError(403, "not your chat");
+  // Only the person who sent the latest message can trigger its push.
+  if (c.lastSenderId !== uid) return { skipped: "not the latest sender" };
+  const text = String(c.lastMessage ?? "").trim();
+  if (!text) return { skipped: "empty" };
+  if (Date.now() - ms(c.lastMessageTime) > 5 * 60e3) return { skipped: "old message" };
+
+  const customerId = String(c.customerId ?? participants[0] ?? "");
+  const helperId = String(c.helperId ?? participants[1] ?? "");
+  const toHelper = uid === customerId;
+  const otherUid = toHelper ? helperId : customerId;
+  if (!otherUid || otherUid === uid) return { skipped: "no recipient" };
+
+  // Light throttle per recipient so a burst of messages doesn't spam pushes.
+  const pushAt = (c.pushAt ?? {}) as Record<string, unknown>;
+  if (Date.now() - ms(pushAt[otherUid]) < CHAT_PUSH_GAP_MS) return { skipped: "throttled" };
+
+  const senderName = toHelper ? first(c.customerName ?? c.userName) : first(c.helperName ?? c.otherName);
+  const service = String(c.serviceName ?? "");
+  const title = senderName ? (service ? `${senderName} · ${service}` : senderName) : (service || "New message");
+  const body = text.length > 140 ? `${text.slice(0, 140)}…` : text;
+
+  const sent = await deliver(env, fs, [{
+    uid: otherUid,
+    role: toHelper ? "helper" : "user",
+    key: "chat_message",
+    vars: {},
+    raw: { title, body },
+    inApp: false,
+    channel: "chat",
+    data: { bookingId: chatId, chatId, senderName },
+    itemId: `chat_${chatId}`,
+    collapseKey: `chat_${chatId}`,
+  }], [{
+    path: `chats/${chatId}`,
+    fields: { pushAt: { [otherUid]: new Date() } },
+    mask: [`pushAt.${quoteSegment(otherUid)}`],
+  }]);
+  return { sent };
 }
 
 // ─── Router ─────────────────────────────────────────────────────────────────
@@ -299,6 +373,9 @@ export default {
         case "booking":
           if (!ID.test(body.bookingId ?? "")) throw new HttpError(400, "bookingId");
           return json(await onBooking(env, fs, uid, body.bookingId!));
+        case "chat":
+          if (!ID.test(body.bookingId ?? "")) throw new HttpError(400, "bookingId");
+          return json(await onChat(env, fs, uid, body.bookingId!));
         default:
           throw new HttpError(400, "unknown event");
       }
